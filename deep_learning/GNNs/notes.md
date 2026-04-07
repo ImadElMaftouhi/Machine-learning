@@ -88,7 +88,7 @@ Difficulties:
 - Sparse graphs waste most of the matrix entries, so the representation becomes inefficient.
 - Fixed size makes batching graphs of different sizes awkward.
 - Permuting node indices changes the matrix, even though the graph is the same, so the representation is not naturally permutation invariant.
-- Another problem is that there are many adjacency matrices that can cnode the same connectivity and ther is no guarantee that thesse different matrics would priduce the same result in a deep neural network.
+- Another problem is that there are many adjacency matrices that can encode the same connectivity and there is no guarantee that these different matrices would produce the same result in a deep neural network.
 
 ### Edge lists
 
@@ -113,3 +113,40 @@ Difficulties:
 - Some graph frameworks require both node and edge indexing schemes, so converting between representations can be error-prone.
 
 Overall, the choice of connectivity representation balances memory efficiency, ease of batching, and support for permutation-invariant graph operations.
+
+## Graph Neural Networks
+
+A GNN is an optimizable transformation on all attributes of the graph (nodes, edges, global-context) that preserves graph symmetries (permutation invariances). 
+
+The simplest GNN architecture is one where we learn new embeddings for all graph attributes (nodes, edges, global) but where we do not yet use the connectivity of the graph.
+
+This GNN uses a separate multilayer perceptron (MLP) on each component of a graph; called a GNN layer.
+
+### Message Passing in GNNs
+
+To incorporate graph connectivity, GNNs use a message-passing mechanism. In each layer, nodes aggregate information from their neighbors via edges. This process updates node representations by combining local features with aggregated neighbor information.
+
+A basic message-passing step can be formalized as:
+
+1. **Message Computation**: For each edge, compute a message based on the source node and edge features.
+2. **Aggregation**: For each node, aggregate messages from its incoming edges (e.g., sum, mean, or max).
+3. **Update**: Update the node's representation using the aggregated messages and its current features, often via an MLP.
+
+This allows GNNs to capture local graph structure and propagate information across the graph.
+
+### Variants of GNNs
+
+Several popular GNN variants build on this foundation:
+
+- **Graph Convolutional Networks (GCNs)**: Use spectral graph convolutions, aggregating neighbor features with normalized adjacency.
+- **GraphSAGE**: Samples neighbors for scalability, using mean or LSTM aggregation.
+- **GAT (Graph Attention Networks)**: Applies attention mechanisms to weigh neighbor importance.
+- **GIN (Graph Isomorphism Networks)**: Designed to be as powerful as the Weisfeiler-Lehman graph isomorphism test.
+
+### Training GNNs
+
+GNNs are trained end-to-end using backpropagation, similar to other neural networks. Loss functions depend on the task: cross-entropy for classification, mean squared error for regression. Challenges include overfitting on small graphs and handling variable sizes.
+
+### Applications and Libraries
+
+GNNs excel in domains like drug discovery, social network analysis, and recommendation systems. Popular libraries include PyTorch Geometric, DGL, and TensorFlow GNN, providing efficient implementations for message passing and graph operations.
