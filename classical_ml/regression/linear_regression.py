@@ -2,7 +2,7 @@ import numpy as np
 
 np.random.seed(42)
 
-class LinearRegressoin:
+class LinearRegression:
     def __init__(self, solver="normal", lr=0.001, n_iter=1000):
         self.solver = solver
         self.lr = lr
