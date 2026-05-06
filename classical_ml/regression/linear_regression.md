@@ -33,6 +33,14 @@ $$\mathbb{E}[y \mid \mathbf{x}] = f(\mathbf{x}) = \mathbf{x}^\top \boldsymbol{\b
 
 where linearity is with respect to the **parameters** $\boldsymbol{\beta}$, not necessarily with respect to the features $\mathbf{x}$ (which may be nonlinearly transformed).
 
+$\mathbf{x}^\top \boldsymbol{\beta}$, $\mathbf{x} \in \mathbb{R}^{p+1}$ is  a **column vector** (the convention throughout the document), so a single observation's feature vector is:
+
+$$\mathbf{x} = \begin{pmatrix} 1 \\ x_1 \\ x_2 \\ \vdots \\ x_p \end{pmatrix} \in \mathbb{R}^{p+1}$$
+
+and $\boldsymbol{\beta} \in \mathbb{R}^{p+1}$ is also a column vector. The inner product $\mathbf{x}^\top \boldsymbol{\beta}$ is then a row vector times a column vector, yielding a scalar, which is the correct type for $\mathbb{E}[y \mid \mathbf{x}]$.
+
+Writing it as $\boldsymbol{\beta}^\top \mathbf{x}$ would be equally valid and perhaps more common in machine learning literature. Both express the same scalar dot product.
+
 ---
 
 ## 2. Problem Formulation
