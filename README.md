@@ -62,15 +62,3 @@ pip install -r requirements.txt
 # 3. Launch Jupyter
 jupyter notebook
 ```
-
-## Topics Covered
-
-- [x] NumPy fundamentals
-- [x] Pandas fundamentals
-- [x] Graph Neural Networks (GNNs)
-- [ ] Classical ML algorithms
-- [ ] CNNs / image classification
-- [ ] RNNs / sequence modeling
-- [ ] Transformers / NLP
-- [ ] Reinforcement Learning
-- [ ] End-to-end projects
