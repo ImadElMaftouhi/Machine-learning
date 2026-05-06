@@ -84,7 +84,7 @@ def evaluate_linreg(solver="normal"):
 
     sns.set_style("whitegrid")
     fig, axes = plt.subplots(2, 3, figsize=(18, 10))
-    sns.lineplot(data=df, x='n_features', y='fit_time', ax=axes[0,0], marker='o').set(title="Fit time O(p³+np²)", ylabel="seconds")
+    sns.lineplot(data=df, x='n_features', y='fit_time', ax=axes[0,0], marker='o').set(title="Fit time O(p³/3)", ylabel="seconds")
     sns.lineplot(data=df, x='n_features', y='mse', ax=axes[0,1], marker='o').set(title="MSE", ylabel="MSE")
     sns.lineplot(data=df, x='n_features', y='mae', ax=axes[0,2], marker='o').set(title="MAE", ylabel="MAE")
     sns.lineplot(data=df, x='n_features', y='rmse', ax=axes[1,0], marker='o').set(title="RMSE", ylabel="RMSE")
