@@ -19,6 +19,7 @@ class LinearRegression:
         return np.hstack([np.ones((X.shape[0], 1)), X]) # add w[0] as intercept
     
     def fit(self,X:np.ndarray,y:np.ndarray):
+        self.loss_history = []
         X_b = self._add_bias(X)
         if self.solver == "normal":
             self.coef_ = np.linalg.pinv(X_b.T @ X_b) @  X_b.T @ y
