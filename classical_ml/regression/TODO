@@ -1,2 +1,2 @@
 - [X] write a code to plot the Computation complexity of LinearRegression via normal equation and gradient descent against the scale of the input
-- [] study the computational complexity of LinearRegression via Gradient descent and compare to normal equation approach
+- [X] study the computational complexity of LinearRegression via Gradient descent and compare to normal equation approach
