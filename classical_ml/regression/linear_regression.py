@@ -1,70 +1,71 @@
 import numpy as np
 import scipy.linalg as la
+from numba import njit
 
 class LinearRegression:
-    def __init__(self, solver="auto", lr=0.001, n_iter=1000, tol=1e-6):
-        # Use ValueError instead of assert for user-facing validation
+    def __init__(self, solver="auto", lr=0.01, n_iter=2000, tol=1e-6):
         if solver not in ["normal", "gradient_descent", "auto"]:
-            raise ValueError("solver should be in (normal, gradient_descent, auto)")
+            raise ValueError("solver must be 'normal', 'gradient_descent', or 'auto'")
             
         self.solver = solver
         self.lr = lr
         self.n_iter = n_iter
         self.tol = tol
         self.coef_ = None
-        self.loss_history = []
         self.intercept_ = None
-
-    def __str__(self):
-        return f"LinearRegression(solver={self.solver})"
+        self.loss_history = []
 
     def _add_bias(self, X):
-        # Ensure X is 2D even if a 1D array is passed
         X = np.asarray(X)
         if X.ndim == 1:
             X = X.reshape(-1, 1)
         return np.hstack([np.ones((X.shape[0], 1)), X])
-    
+
+    @staticmethod
+    @njit(fastmath=True)
+    def _gd_fit(X_b, y, lr, n_iter, tol):
+        n_samples, n_features = X_b.shape
+        coef = np.zeros(n_features)
+        loss_history = np.zeros(n_iter)
+        
+        for i in range(n_iter):
+            residuals = X_b @ coef - y
+            grad = (2 / n_samples) * (X_b.T @ residuals)
+            coef -= lr * grad
+            
+            loss = np.dot(residuals, residuals)
+            loss_history[i] = loss
+            
+            if i > 10 and abs(loss_history[i] - loss_history[i-10]) < tol:
+                return coef, loss_history[:i+1]
+        
+        return coef, loss_history
+
     def fit(self, X, y):
-        if X is None or y is None: raise ValueError("X and y cannot be None")
         self.loss_history = []
         X_b = self._add_bias(X)
+        y = np.asarray(y).flatten()
         
-        y = np.asarray(y).flatten() # Ensure y is 1D
-        
-        # Auto-select solver based on data size
-        if self.solver == "auto":
-            # Standard heuristic: Normal equation is faster for small/medium features
-            self.solver = "normal" if X_b.shape[1] < 10000 else "gradient_descent"
+        solver = self.solver
+        if solver == "auto":
+            solver = "normal" if X_b.shape[1] <= 1200 else "gradient_descent"
 
-        if self.solver == "normal":
-            # VASTLY superior numerical stability compared to X.T @ X
-            # lstsq uses SVD and handles rank-deficient matrices natively
+        if solver == "normal":
             self.coef_, _, _, _ = la.lstsq(X_b, y)
             
-        elif self.solver == "gradient_descent":
-            n = X_b.shape[0]
-            self.coef_ = np.zeros(X_b.shape[1])
-            
-            for i in range(self.n_iter):
-                residuals = X_b @ self.coef_ - y
-                grad = (2 / n) * (X_b.T @ residuals)
-                self.coef_ -= self.lr * grad
-                
-                loss = float(residuals @ residuals)
-                self.loss_history.append(loss)
-                
-                # Early stopping mechanism
-                if i > 0 and abs(self.loss_history[-2] - loss) < self.tol:
-                    break
+        elif solver == "gradient_descent":
+            self.coef_, self.loss_history = self._gd_fit(
+                X_b.astype(np.float64), 
+                y.astype(np.float64), 
+                self.lr, 
+                self.n_iter, 
+                self.tol
+            )
 
-        if self.coef_ is not None:
-            self.intercept_ = self.coef_[0]
-            
+        self.intercept_ = self.coef_[0]
         return self
-        
+
     def predict(self, X):
-        X_b = self._add_bias(X)
         if self.coef_ is None:
-            raise ValueError("This LinearRegression instance is not fitted yet. Call 'fit' first.")
-        return X_b @ self.coef_
+            raise ValueError("Model not fitted yet.")
+        return self._add_bias(X) @ self.coef_
