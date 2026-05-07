@@ -1,2 +1,12 @@
+
+# 07/05/2026
+- [X] improved solver comparison visualization in performance_evaluation.py: merged barplot + lineplot into a single figure with log-scale lineplots, per-point value annotations, and a 6th panel showing the GD/Normal fit-time ratio
+- [X] extended rg_analysis.py to benchmark RidgeRegression across all solver/method configs (normal/cholesky, normal/qr, normal/svd, gradient_descent, auto) instead of a single config
+- [X] updated plot_results() to show hue per config on all line plots and added a dedicated bias-variance panel (train vs test R² per config)
+- [X] fixed GD divergence in sweep_penalty(): ridge_regression.py now auto-clips the learning rate to the theoretical safe bound 1/L where L = 2*(‖X‖²/n + λ), preventing overflow at large penalty values
+- [X] added divergence guard in GD loop: breaks early if loss becomes non-finite
+
+
+# 06/05/2026
 - [X] write a code to plot the Computation complexity of LinearRegression via normal equation and gradient descent against the scale of the input
 - [X] study the computational complexity of LinearRegression via Gradient descent and compare to normal equation approach
