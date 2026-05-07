@@ -1,4 +1,4 @@
-# performance_evaluation.py
+# linreg_analysis.py
 # This code evaluates the performance of a custom Linear Regression implementation across varying numbers of features.
 # the goal is to study the performance of the normal equation solver as the number of features increases, in terms of fit time, predict time, and various regression metrics (MSE, MAE, RMSE, R²).
 
