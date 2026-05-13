@@ -11,8 +11,10 @@ class LogisticRegression:
     def _sigmoid(self, z):
         return 1 / (1 + np.exp(-z))
 
-    def fit(self):
-        pass
+    def fit(self, X, y):
+        n_samples, n_features = X.shape
+        self.weights = np.zeros(n_features)
+        self.bias = 0.0
 
     def predict(self):
         pass
