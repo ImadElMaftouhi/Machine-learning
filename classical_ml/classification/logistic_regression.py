@@ -43,5 +43,5 @@ class LogisticRegression:
         return "Logistic Regression Classifier"
     
     def __repr__(self) -> str:
-        return f"LogisticRegression()"
+        return f"LogisticRegression(lr={self.learning_rate}, n_iter={self.n_iter})"
     
