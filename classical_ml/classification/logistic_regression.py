@@ -16,6 +16,16 @@ class LogisticRegression:
         self.weights = np.zeros(n_features)
         self.bias = 0.0
 
+        for _ in range(self.n_iter):
+            z = X @ self.weights + self.bias
+            y_hat = self._sigmoid(z)
+
+            dw = (1 / n_samples) * X.T @ (y_hat - y)
+            db = (1 / n_samples) * np.sum(y_hat - y)
+
+            self.weights -= self.learning_rate * dw
+            self.bias    -= self.learning_rate * db
+
     def predict(self):
         pass
 
