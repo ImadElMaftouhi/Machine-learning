@@ -26,8 +26,11 @@ class LogisticRegression:
             self.weights -= self.learning_rate * dw
             self.bias    -= self.learning_rate * db
 
-    def predict(self):
-        pass
+    def predict_proba(self, X):
+        return self._sigmoid(X @ self.weights + self.bias)
+
+    def predict(self, X, threshold=0.5):
+        return (self.predict_proba(X) >= threshold).astype(int)
 
     def __str__(self):
         return "Logistic Regression Classifier"
