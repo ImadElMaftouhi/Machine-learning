@@ -15,10 +15,14 @@ class LogisticRegression:
         n_samples, n_features = X.shape
         self.weights = np.zeros(n_features)
         self.bias = 0.0
+        self.losses_ = []
 
         for _ in range(self.n_iter):
             z = X @ self.weights + self.bias
             y_hat = self._sigmoid(z)
+
+            loss = -np.mean(y * np.log(y_hat + 1e-9) + (1 - y) * np.log(1 - y_hat + 1e-9))
+            self.losses_.append(loss)
 
             dw = (1 / n_samples) * X.T @ (y_hat - y)
             db = (1 / n_samples) * np.sum(y_hat - y)
