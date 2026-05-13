@@ -36,6 +36,9 @@ class LogisticRegression:
     def predict(self, X, threshold=0.5):
         return (self.predict_proba(X) >= threshold).astype(int)
 
+    def score(self, X, y):
+        return np.mean(self.predict(X) == y)
+
     def __str__(self):
         return "Logistic Regression Classifier"
     
