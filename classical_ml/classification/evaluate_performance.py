@@ -8,14 +8,14 @@ from sklearn.datasets import make_classification
 from sklearn.model_selection import train_test_split, StratifiedKFold
 from sklearn.preprocessing import StandardScaler, label_binarize
 from sklearn.metrics import (
-    confusion_matrix, roc_auc_score, roc_curve,
+    classification_report, confusion_matrix, roc_auc_score, roc_curve,
     precision_recall_curve, average_precision_score,
     accuracy_score, f1_score, precision_score, recall_score, log_loss,
 )
 from time import perf_counter
 
 from logistic_regression import LogisticRegression
-
+from knn import KNN
 
 sns.set_theme(style="whitegrid", palette="muted")
 SEED = 42
@@ -491,13 +491,37 @@ def evaluate_LogisticRegression(cls_type: str = "binary") -> None:
     print("\nDone.")
     plt.show()
 
+def evaluate_KNN(cls_type: str = "binary") -> None:
+    X, y = _make_dataset(cls_type, n_samples=1000, n_features=20, n_informative=10, class_sep=1.0, noise_flip=0.05)
+    X_tr, X_te, y_tr, y_te = _split_scale(X, y)
+    
+    model = KNN(k=5)
+    model.fit(X_tr, y_tr)
+    pred = model.predict(X_te)
+    
+    classes = np.unique(y_te)
+    average = "binary" if cls_type == "binary" else "weighted"
+    
+    acc  = accuracy_score(y_te, pred)
+    prec = precision_score(y_te, pred, average=average)
+    rec  = recall_score(y_te, pred, average=average)
+    f1   = f1_score(y_te, pred, average=average)
+    cm   = confusion_matrix(y_te, pred)
+
+    print(f"\n--- KNN Evaluation ({cls_type}) ---")
+    print(f"Accuracy  : {acc:.4f}")
+    print(f"Precision : {prec:.4f}")
+    print(f"Recall    : {rec:.4f}")
+    print(f"F1 Score  : {f1:.4f}")
+    print(f"\nConfusion Matrix:\n{cm}")
+    print(f"\nDetailed Report:\n{classification_report(y_te, pred)}")
 
 def main():
     parser = argparse.ArgumentParser(
         description="Evaluate LogisticRegression performance.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument("--algo", default="logistic_regression", choices=["logistic_regression"],
+    parser.add_argument("--algo", default="logistic_regression", choices=["logistic_regression", "knn"],
                         help="Which algorithm to evaluate.")
 
     parser.add_argument(
@@ -509,6 +533,8 @@ def main():
 
     if args.algo == "logistic_regression":
         evaluate_LogisticRegression(cls_type=args.cls_type)
+    elif args.algo == "knn":
+        evaluate_KNN(cls_type=args.cls_type)
     else:
         raise ValueError(f"Unsupported algorithm {args.algo!r}.")
 
