@@ -166,6 +166,7 @@ class LogisticRegression:
                       f"thetas={np.round(self.thetas_, 3)}")
 
         self.thetas_ = _thetas_from_raw(raw_thetas)
+        self.bias = 0 # avoid Assertions in predict_proba; not used in ordinal model
 
     # ── public API ────────────────────────────────────────────────────────────
 
