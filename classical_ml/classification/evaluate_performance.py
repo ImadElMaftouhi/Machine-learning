@@ -1,6 +1,7 @@
 import numpy as np
 import scipy.stats as stats
 import matplotlib.pyplot as plt
+import matplotlib.figure as mplfig
 import seaborn as sns
 import argparse
 
@@ -16,6 +17,7 @@ from time import perf_counter
 
 from logistic_regression import LogisticRegression
 from knn import KNN
+from naive_bayes import BernoulliNB, MultinomialNB, GaussianNB
 
 sns.set_theme(style="whitegrid", palette="muted")
 SEED = 42
@@ -26,9 +28,9 @@ N_CLASSES = {"binary": 2, "multinomial": 4, "ordinal": 5}
 VALID_TYPES = ("binary", "multinomial", "ordinal", "all")
 
 
-# ──────────────────────────────────────────────────────────────────────────────
+# ----------------------
 # Helpers
-# ──────────────────────────────────────────────────────────────────────────────
+# ----------------------
 
 def _make_dataset(cls_type, n_samples=2000, n_features=20, n_informative=10,
                   class_sep=1.0, noise_flip=0.0, random_state=SEED):
@@ -97,9 +99,9 @@ def _new_model(cls_type, lr=0.05, n_iter=1000):
     return LogisticRegression(lr=lr, n_iter=n_iter, type=cls_type)
 
 
-# ──────────────────────────────────────────────────────────────────────────────
+# ----------------------
 # Experiment 1 – convergence & training dynamics
-# ──────────────────────────────────────────────────────────────────────────────
+# ----------------------
 
 def exp_convergence(cls_type, lr_grid=(0.001, 0.01, 0.05, 0.1), n_iter=2000):
     X, y   = _make_dataset(cls_type)
@@ -126,9 +128,9 @@ def exp_convergence(cls_type, lr_grid=(0.001, 0.01, 0.05, 0.1), n_iter=2000):
     return fig
 
 
-# ──────────────────────────────────────────────────────────────────────────────
+# ----------------------
 # Experiment 2 – decision boundary / class confidence analysis
-# ──────────────────────────────────────────────────────────────────────────────
+# ----------------------
 
 def exp_decision_analysis(cls_type):
     X, y   = _make_dataset(cls_type)
@@ -219,9 +221,9 @@ def exp_decision_analysis(cls_type):
     return fig
 
 
-# ──────────────────────────────────────────────────────────────────────────────
+# ----------------------
 # Experiment 3 – cross-validated performance + confidence intervals
-# ──────────────────────────────────────────────────────────────────────────────
+# ----------------------
 
 def exp_cross_validation(cls_type, n_splits=10):
     X, y = _make_dataset(cls_type, n_samples=3000)
@@ -274,9 +276,9 @@ def exp_cross_validation(cls_type, n_splits=10):
     return fig
 
 
-# ──────────────────────────────────────────────────────────────────────────────
+# ----------------------
 # Experiment 4 – sensitivity to dataset difficulty
-# ──────────────────────────────────────────────────────────────────────────────
+# ----------------------
 
 def exp_dataset_difficulty(cls_type):
     sep_grid   = np.linspace(0.3, 3.0, 8)
@@ -328,9 +330,9 @@ def exp_dataset_difficulty(cls_type):
     return fig
 
 
-# ──────────────────────────────────────────────────────────────────────────────
+# ----------------------
 # Experiment 5 – confusion matrix + calibration
-# ──────────────────────────────────────────────────────────────────────────────
+# ----------------------
 
 def exp_confusion_and_calibration(cls_type):
     X, y = _make_dataset(cls_type, n_samples=3000)
@@ -408,9 +410,9 @@ def exp_confusion_and_calibration(cls_type):
     return fig
 
 
-# ──────────────────────────────────────────────────────────────────────────────
+# ----------------------
 # Experiment 6 – scalability (n_samples × n_features)
-# ──────────────────────────────────────────────────────────────────────────────
+# ----------------------
 
 def exp_scalability(cls_type):
     sample_grid  = [200, 500, 1000, 2000, 5000]
@@ -457,9 +459,9 @@ def exp_scalability(cls_type):
     return fig
 
 
-# ──────────────────────────────────────────────────────────────────────────────
+# ----------------------
 # Logistic Regression Entry point
-# ──────────────────────────────────────────────────────────────────────────────
+# ----------------------
 
 def evaluate_LogisticRegression(cls_type: str = "binary") -> None:
     if cls_type not in VALID_TYPES:
@@ -491,9 +493,9 @@ def evaluate_LogisticRegression(cls_type: str = "binary") -> None:
     print("\nDone.")
     plt.show()
 
-# ──────────────────────────────────────────────────────────────────────────────
+# ----------------------
 # KNN helpers
-# ──────────────────────────────────────────────────────────────────────────────
+# ----------------------
 
 def _knn_eval(cls_type: str, model: KNN, X_tr, y_tr, X_te, y_te) -> dict:
     """Fit-then-evaluate helper for KNN. Records predict time instead of fit time."""
@@ -507,9 +509,9 @@ def _knn_eval(cls_type: str, model: KNN, X_tr, y_tr, X_te, y_te) -> dict:
             "proba": proba, "pred": pred}
 
 
-# ──────────────────────────────────────────────────────────────────────────────
+# ----------------------
 # KNN Experiment 1 – k sweep (bias-variance tradeoff)
-# ──────────────────────────────────────────────────────────────────────────────
+# ----------------------
 
 def exp_knn_k_sweep(cls_type: str, k_max: int = 40):
     """
@@ -560,9 +562,9 @@ def exp_knn_k_sweep(cls_type: str, k_max: int = 40):
     return fig
 
 
-# ──────────────────────────────────────────────────────────────────────────────
+# ----------------------
 # KNN Experiment 2 – distance metric + weighting comparison
-# ──────────────────────────────────────────────────────────────────────────────
+# ----------------------
 
 def exp_knn_distance_comparison(cls_type: str, k: int = 5):
     """Compare euclidean / manhattan / cosine and uniform / distance weighting."""
@@ -627,9 +629,9 @@ def exp_knn_distance_comparison(cls_type: str, k: int = 5):
     return fig
 
 
-# ──────────────────────────────────────────────────────────────────────────────
+# ----------------------
 # KNN Experiment 3 – confusion matrix + cross-validated metrics
-# ──────────────────────────────────────────────────────────────────────────────
+# ----------------------
 
 def exp_knn_confusion(cls_type: str, k: int = 5):
     X, y = _make_dataset(cls_type, n_samples=2000)
@@ -691,9 +693,9 @@ def exp_knn_confusion(cls_type: str, k: int = 5):
     return fig
 
 
-# ──────────────────────────────────────────────────────────────────────────────
+# ----------------------
 # KNN Experiment 4 – scalability (predict time, not fit time)
-# ──────────────────────────────────────────────────────────────────────────────
+# ----------------------
 
 def exp_knn_scalability(cls_type: str, k: int = 5):
     """
@@ -742,9 +744,9 @@ def exp_knn_scalability(cls_type: str, k: int = 5):
     return fig
 
 
-# ──────────────────────────────────────────────────────────────────────────────
+# ----------------------
 # KNN entry point
-# ──────────────────────────────────────────────────────────────────────────────
+# ----------------------
 
 def evaluate_KNN(cls_type: str = "binary") -> None:
     if cls_type not in VALID_TYPES:
@@ -773,18 +775,431 @@ def evaluate_KNN(cls_type: str = "binary") -> None:
     print("\nDone.")
     plt.show()
 
+# ----------------------
+# Naive Bayes helpers
+# ----------------------
+
+VALID_NB_VARIANTS = ("gaussian", "bernoulli", "multinomial", "all")
+
+
+def _new_nb_model(nb_variant: str, **kwargs):
+    if nb_variant == "gaussian":
+        return GaussianNB(**kwargs)
+    elif nb_variant == "bernoulli":
+        return BernoulliNB(**kwargs)
+    elif nb_variant == "multinomial":
+        return MultinomialNB(**kwargs)
+    raise ValueError(f"Unknown nb_variant: {nb_variant!r}")
+
+
+def _prepare_nb_data(X_tr, X_te, nb_variant: str):
+    """
+    Each NB variant requires a different data contract.
+    Data arrives already scaled (zero-mean, unit-variance).
+
+    gaussian    — continuous as-is
+    bernoulli   — binary: binarize at 0 (above mean → 1)
+    multinomial — non-negative counts: shift so min=0, then scale
+    """
+    if nb_variant == "gaussian":
+        return X_tr, X_te
+    elif nb_variant == "bernoulli":
+        return (X_tr > 0).astype(float), (X_te > 0).astype(float)
+    else:  # multinomial
+        shift = X_tr.min()           # shift on train stats only (no leakage)
+        return X_tr - shift, X_te - shift
+
+
+def _nb_eval(cls_type: str, model, X_tr, y_tr, X_te, y_te) -> dict:
+    """Fit-then-evaluate for NB. Records fit time (NB has no losses_)."""
+    t0 = perf_counter()
+    model.fit(X_tr, y_tr)
+    fit_time = perf_counter() - t0
+    proba = model.predict_proba(X_te)
+    pred  = model.predict(X_te)
+    return {"fit_time": fit_time,
+            **_compute_metrics(cls_type, y_te, pred, proba),
+            "proba": proba, "pred": pred}
+
+
+# ----------------------
+# NB Experiment 1 – variant comparison
+# ----------------------
+
+def exp_nb_variant_comparison(cls_type: str) -> mplfig.Figure:
+    """
+    Evaluate all three NB variants on the same dataset.
+    Each variant sees data transformed to match its input contract.
+    Shows which assumptions fit the (continuous) data best.
+    """
+    X, y = _make_dataset(cls_type, n_samples=2000)
+    X_tr_raw, X_te_raw, y_tr, y_te = _split_scale(X, y)
+
+    variants    = ["gaussian", "bernoulli", "multinomial"]
+    metric_cols = ["accuracy", "f1", "roc_auc"]
+    palette     = sns.color_palette("muted", len(variants))
+    results: dict[str, dict] = {}
+
+    for v in variants:
+        X_tr, X_te = _prepare_nb_data(X_tr_raw, X_te_raw, v)
+        r = _nb_eval(cls_type, _new_nb_model(v), X_tr, y_tr, X_te, y_te)
+        results[v] = r
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+
+    # ── grouped bar: metrics ──────────────────────────────────────────────────
+    ax    = axes[0]
+    x     = np.arange(len(metric_cols))
+    bar_w = 0.25
+    for i, v in enumerate(variants):
+        vals = [results[v][mc] for mc in metric_cols]
+        bars = ax.bar(x + i * bar_w, vals, width=bar_w, label=v, color=palette[i])
+        for bar, val in zip(bars, vals):
+            ax.text(bar.get_x() + bar.get_width() / 2, val + 0.005,
+                    f"{val:.2f}", ha="center", va="bottom", fontsize=7)
+    ax.set_xticks(x + bar_w)
+    ax.set_xticklabels(metric_cols)
+    ax.set(ylabel="Score", ylim=(0, 1.15), title="Metrics by variant")
+    ax.legend()
+
+    # ── fit time bar ──────────────────────────────────────────────────────────
+    ax = axes[1]
+    times = [results[v]["fit_time"] for v in variants]
+    bars  = ax.bar(variants, times, color=palette, edgecolor="white")
+    for bar, t in zip(bars, times):
+        ax.text(bar.get_x() + bar.get_width() / 2, t + max(times) * 0.01,
+                f"{t*1000:.2f} ms", ha="center", va="bottom", fontsize=9)
+    ax.set(ylabel="Fit time (s)", title="Fit time by variant")
+
+    fig.suptitle(f"NB Exp 1 · Variant comparison  [{cls_type}]",
+                 fontsize=13, fontweight="bold")
+    fig.tight_layout()
+    return fig
+
+
+# ----------------------
+# NB Experiment 2 – smoothing parameter sweep
+# ----------------------
+
+def exp_nb_smoothing(nb_variant: str, cls_type: str) -> mplfig.Figure:
+    """
+    Sweep the smoothing parameter and observe AUC + log-loss.
+
+    gaussian    → var_smoothing  (prevents zero-variance division)
+    bernoulli /
+    multinomial → alpha          (Laplace smoothing on count estimates)
+
+    Higher smoothing = stronger prior toward uniform → higher bias, lower variance.
+    """
+    X, y = _make_dataset(cls_type, n_samples=2000)
+    X_tr_raw, X_te_raw, y_tr, y_te = _split_scale(X, y)
+    X_tr, X_te = _prepare_nb_data(X_tr_raw, X_te_raw, nb_variant)
+
+    if nb_variant == "gaussian":
+        param_name  = "var_smoothing"
+        param_grid  = np.logspace(-12, 0, 30)
+    else:
+        param_name  = "alpha"
+        param_grid  = np.logspace(-3, 2, 30)
+
+    aucs, llosses = [], []
+    for val in param_grid:
+        m = _new_nb_model(nb_variant, **{param_name: val})
+        r = _nb_eval(cls_type, m, X_tr, y_tr, X_te, y_te)
+        aucs.append(r["roc_auc"])
+        llosses.append(r["log_loss"])
+
+    best_idx = int(np.argmax(aucs))
+
+    fig, axes = plt.subplots(1, 2, figsize=(13, 5))
+
+    ax = axes[0]
+    ax.semilogx(param_grid, aucs, marker=".", ms=5)
+    ax.axvline(param_grid[best_idx], color="red", ls="--",
+               label=f"Best {param_name}={param_grid[best_idx]:.2e}")
+    ax.set(xlabel=param_name, ylabel="ROC-AUC",
+           title=f"ROC-AUC vs. {param_name}")
+    ax.legend(fontsize=9)
+
+    ax = axes[1]
+    ax.semilogx(param_grid, llosses, marker=".", ms=5, color="darkorange")
+    ax.axvline(param_grid[best_idx], color="red", ls="--",
+               label=f"Best AUC at {param_grid[best_idx]:.2e}")
+    ax.set(xlabel=param_name, ylabel="Log-loss",
+           title=f"Log-loss vs. {param_name}")
+    ax.legend(fontsize=9)
+
+    fig.suptitle(f"NB Exp 2 · Smoothing sweep  [{nb_variant} · {cls_type}]",
+                 fontsize=13, fontweight="bold")
+    fig.tight_layout()
+    return fig
+
+
+# ----------------------
+# NB Experiment 3 – independence assumption violation
+# ----------------------
+
+def exp_nb_independence(nb_variant: str, cls_type: str) -> mplfig.Figure:
+    """
+    Sweep n_redundant (correlated features) to show how correlation degrades NB.
+    Compares NB against LogisticRegression, which doesn't assume independence.
+
+    As n_redundant rises, features are more correlated → the independence
+    assumption breaks down → NB confidence estimates become overconfident
+    → AUC and F1 drop faster than for LR.
+    """
+    n_features   = 20
+    n_cls        = N_CLASSES[cls_type]
+    redundant_grid = list(range(0, n_features - n_cls, 2))
+
+    nb_aucs, nb_f1s = [], []
+    lr_aucs, lr_f1s = [], []
+
+    for n_red in redundant_grid:
+        n_inf = max(n_cls, n_features - n_red)
+        X, y  = make_classification(
+            n_samples=1500, n_features=n_features,
+            n_informative=n_inf, n_redundant=n_red,
+            n_clusters_per_class=1, n_classes=n_cls,
+            random_state=SEED,
+        )
+        X_tr_raw, X_te_raw, y_tr, y_te = _split_scale(X, y)
+
+        # NB
+        X_tr, X_te = _prepare_nb_data(X_tr_raw, X_te_raw, nb_variant)
+        r_nb = _nb_eval(cls_type, _new_nb_model(nb_variant), X_tr, y_tr, X_te, y_te)
+        nb_aucs.append(r_nb["roc_auc"]); nb_f1s.append(r_nb["f1"])
+
+        # Logistic Regression baseline
+        r_lr = _nb_eval(cls_type,
+                        LogisticRegression(lr=0.05, n_iter=500, type=cls_type),
+                        X_tr_raw, y_tr, X_te_raw, y_te)
+        lr_aucs.append(r_lr["roc_auc"]); lr_f1s.append(r_lr["f1"])
+
+    fig, axes = plt.subplots(1, 2, figsize=(13, 5))
+
+    ax = axes[0]
+    ax.plot(redundant_grid, nb_aucs, marker="o", label=f"NaiveBayes ({nb_variant})")
+    ax.plot(redundant_grid, lr_aucs, marker="s", ls="--", label="LogisticRegression")
+    ax.set(xlabel="n_redundant (correlated features)", ylabel="ROC-AUC",
+           title="ROC-AUC vs. feature correlation")
+    ax.legend()
+
+    ax = axes[1]
+    ax.plot(redundant_grid, nb_f1s, marker="o", label=f"NaiveBayes ({nb_variant})")
+    ax.plot(redundant_grid, lr_f1s, marker="s", ls="--", label="LogisticRegression")
+    ax.set(xlabel="n_redundant (correlated features)", ylabel="F1",
+           title="F1 vs. feature correlation")
+    ax.legend()
+
+    fig.suptitle(f"NB Exp 3 · Independence assumption  [{nb_variant} · {cls_type}]",
+                 fontsize=13, fontweight="bold")
+    fig.tight_layout()
+    return fig
+
+
+# ----------------------
+# NB Experiment 4 – confusion matrix + calibration
+# ----------------------
+
+def exp_nb_confusion_calibration(nb_variant: str, cls_type: str) -> mplfig.Figure:
+    """
+    Confusion matrix + reliability diagram.
+
+    NB is famously overconfident: the independence assumption causes each
+    feature's evidence to be counted as if it were independent, so predicted
+    probabilities cluster near 0 and 1 even when the true confidence is moderate.
+    The reliability diagram makes this visible.
+    """
+    X, y = _make_dataset(cls_type, n_samples=3000)
+    X_tr_raw, X_te_raw, y_tr, y_te = _split_scale(X, y)
+    X_tr, X_te = _prepare_nb_data(X_tr_raw, X_te_raw, nb_variant)
+    r = _nb_eval(cls_type, _new_nb_model(nb_variant), X_tr, y_tr, X_te, y_te)
+    proba, pred = r["proba"], r["pred"]
+    classes = np.unique(y_te)
+    K = len(classes)
+
+    n_cols = 3 if cls_type == "ordinal" else 2
+    fig, axes = plt.subplots(1, n_cols, figsize=(6 * n_cols, 5))
+    palette = sns.color_palette("muted", K)
+
+    # ── Confusion matrix ──────────────────────────────────────────────────────
+    ax = axes[0]
+    cm      = confusion_matrix(y_te, pred, labels=classes)
+    cm_norm = cm.astype(float) / cm.sum(axis=1, keepdims=True)
+    sns.heatmap(cm_norm, annot=True, fmt=".2%", cmap="Blues",
+                xticklabels=[str(c) for c in classes],
+                yticklabels=[str(c) for c in classes],
+                ax=ax, linewidths=0.5)
+    for (i, j), raw in np.ndenumerate(cm):
+        ax.text(j + 0.5, i + 0.72, f"n={raw}", ha="center", va="center",
+                fontsize=7, color="gray")
+    ax.set(title=f"Confusion matrix  [{nb_variant}]",
+           xlabel="Predicted", ylabel="True")
+
+    # ── Reliability diagram ───────────────────────────────────────────────────
+    ax     = axes[1]
+    n_bins = 10
+    bins   = np.linspace(0, 1, n_bins + 1)
+    ax.plot([0, 1], [0, 1], "k--", alpha=0.5, label="Perfect calibration")
+
+    if cls_type == "binary":
+        bin_ids   = np.digitize(proba, bins[1:-1])
+        mean_pred = [proba[bin_ids == b].mean()  if (bin_ids == b).any() else np.nan
+                     for b in range(n_bins)]
+        frac_pos  = [y_te[bin_ids == b].mean()   if (bin_ids == b).any() else np.nan
+                     for b in range(n_bins)]
+        ax.plot(mean_pred, frac_pos, marker="o", lw=2, label=nb_variant)
+        ax.fill_between(mean_pred, frac_pos, mean_pred,
+                        alpha=0.15, color="steelblue", label="Miscalibration gap")
+    else:
+        Y_bin = np.asarray(label_binarize(y_te, classes=classes))
+        for k in range(K):
+            pk       = proba[:, k]
+            bin_ids  = np.digitize(pk, bins[1:-1])
+            mean_pred = [pk[bin_ids == b].mean()        if (bin_ids == b).any() else np.nan
+                         for b in range(n_bins)]
+            frac_pos  = [Y_bin[bin_ids == b, k].mean()  if (bin_ids == b).any() else np.nan
+                         for b in range(n_bins)]
+            ax.plot(mean_pred, frac_pos, marker="o", lw=1.5,
+                    color=palette[k], label=f"class {classes[k]}")
+
+    ax.set(xlabel="Mean predicted probability", ylabel="Fraction of positives",
+           title="Reliability diagram — NB tends to overconfidence",
+           xlim=(0, 1), ylim=(0, 1))
+    ax.legend(fontsize=8)
+
+    # ── Ordinal error distribution ────────────────────────────────────────────
+    if cls_type == "ordinal":
+        ax = axes[2]
+        pred_idx = np.searchsorted(classes, pred)
+        true_idx = np.searchsorted(classes, y_te)
+        errors   = pred_idx - true_idx
+        unique_e, counts = np.unique(errors, return_counts=True)
+        ax.bar(unique_e, counts / len(errors), color="mediumpurple",
+               edgecolor="white", width=0.6)
+        ax.axvline(0, color="black", ls="--", alpha=0.5)
+        ax.set(xlabel="Predicted − True class", ylabel="Proportion",
+               title=f"Ordinal error  (MAE={np.mean(np.abs(errors)):.3f})")
+        ax.set_xticks(unique_e)
+
+    fig.suptitle(f"NB Exp 4 · Confusion & calibration  [{nb_variant} · {cls_type}]",
+                 fontsize=13, fontweight="bold")
+    fig.tight_layout()
+    return fig
+
+
+# ----------------------
+# NB Experiment 5 – scalability (fit time heatmap)
+# ----------------------
+
+def exp_nb_scalability(nb_variant: str, cls_type: str) -> mplfig.Figure:
+    """
+    NB fit is O(n * d) — one pass to accumulate sufficient statistics.
+    This makes it extremely fast compared to gradient-based models.
+    Predict is O(K * d) per sample — independent of training set size.
+    """
+    sample_grid  = [200, 500, 1000, 5000, 20000]
+    feature_grid = [5, 10, 20, 50, 100]
+    n_cls = N_CLASSES[cls_type]
+
+    fit_time_mat = np.zeros((len(sample_grid), len(feature_grid)))
+    auc_mat      = np.zeros_like(fit_time_mat)
+
+    for i, n in enumerate(sample_grid):
+        for j, d in enumerate(feature_grid):
+            n_inf = max(n_cls, min(d, d // 2))
+            X, y  = _make_dataset(cls_type, n_samples=n, n_features=d,
+                                  n_informative=n_inf)
+            X_tr_raw, X_te_raw, y_tr, y_te = _split_scale(X, y)
+            X_tr, X_te = _prepare_nb_data(X_tr_raw, X_te_raw, nb_variant)
+            r = _nb_eval(cls_type, _new_nb_model(nb_variant),
+                         X_tr, y_tr, X_te, y_te)
+            fit_time_mat[i, j] = r["fit_time"]
+            auc_mat[i, j]      = r["roc_auc"]
+
+    row_labels = [str(n) for n in sample_grid]
+    col_labels = [str(d) for d in feature_grid]
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+    sns.heatmap(fit_time_mat, annot=True, fmt=".4f", cmap="YlOrRd",
+                xticklabels=col_labels, yticklabels=row_labels,
+                ax=axes[0], linewidths=0.4)
+    axes[0].set(xlabel="n_features", ylabel="n_samples",
+                title="Fit time (s)  — O(n·d), single pass")
+
+    sns.heatmap(auc_mat, annot=True, fmt=".3f", cmap="Blues",
+                xticklabels=col_labels, yticklabels=row_labels,
+                ax=axes[1], linewidths=0.4, vmin=0.5, vmax=1.0)
+    axes[1].set(xlabel="n_features", ylabel="n_samples", title="ROC-AUC")
+
+    fig.suptitle(f"NB Exp 5 · Scalability  [{nb_variant} · {cls_type}]",
+                 fontsize=13, fontweight="bold")
+    fig.tight_layout()
+    return fig
+
+
+# ----------------------
+# Naive Bayes entry point
+# ----------------------
+
+def evaluate_NaiveBayes(nb_variant: str = "gaussian", cls_type: str = "binary") -> None:
+    if nb_variant not in VALID_NB_VARIANTS:
+        raise ValueError(f"nb_variant must be one of {VALID_NB_VARIANTS}. Got {nb_variant!r}.")
+    if cls_type not in VALID_TYPES:
+        raise ValueError(f"cls_type must be one of {VALID_TYPES}. Got {cls_type!r}.")
+
+    if nb_variant == "all":
+        for v in VALID_NB_VARIANTS[:-1]:
+            evaluate_NaiveBayes(nb_variant=v, cls_type=cls_type)
+        return
+    if cls_type == "all":
+        for t in VALID_TYPES[:-1]:
+            evaluate_NaiveBayes(nb_variant=nb_variant, cls_type=t)
+        return
+
+    print(f"Evaluating NaiveBayes  [variant={nb_variant} · type={cls_type}]  "
+          f"({N_CLASSES[cls_type]} classes)\n")
+
+    experiments = [
+        ("Variant comparison",       lambda: exp_nb_variant_comparison(cls_type)),
+        ("Smoothing sweep",          lambda: exp_nb_smoothing(nb_variant, cls_type)),
+        ("Independence assumption",  lambda: exp_nb_independence(nb_variant, cls_type)),
+        ("Confusion & calibration",  lambda: exp_nb_confusion_calibration(nb_variant, cls_type)),
+        ("Scalability",              lambda: exp_nb_scalability(nb_variant, cls_type)),
+    ]
+
+    for name, fn in experiments:
+        print(f"  -> {name} …")
+        fig = fn()
+        # fname = (f"eval_nb_{nb_variant}_{cls_type}_"
+        #          f"{name.lower().replace(' & ', '_').replace(' ', '_')}.png")
+        # fig.savefig(fname, dpi=140, bbox_inches="tight")
+        # print(f"     saved {fname}")
+
+    print("\nDone.")
+    plt.show()
+
+
 def main():
     parser = argparse.ArgumentParser(
-        description="Evaluate LogisticRegression performance.",
+        description="Evaluate classification algorithms.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument("--algo", default="logistic_regression", choices=["logistic_regression", "knn"],
-                        help="Which algorithm to evaluate.")
-
+    parser.add_argument(
+        "--algo", default="logistic_regression",
+        choices=["logistic_regression", "knn", "naive_bayes"],
+        help="Algorithm to evaluate.",
+    )
     parser.add_argument(
         "--type", dest="cls_type", default="binary",
         choices=list(VALID_TYPES),
-        help="Logistic regression mode to evaluate.",
+        help="Classification mode (number of classes / label structure).",
+    )
+    parser.add_argument(
+        "--nb_variant", default="gaussian",
+        choices=list(VALID_NB_VARIANTS),
+        help="Naive Bayes variant (only used when --algo=naive_bayes).",
     )
     args = parser.parse_args()
 
@@ -792,6 +1207,8 @@ def main():
         evaluate_LogisticRegression(cls_type=args.cls_type)
     elif args.algo == "knn":
         evaluate_KNN(cls_type=args.cls_type)
+    elif args.algo == "naive_bayes":
+        evaluate_NaiveBayes(nb_variant=args.nb_variant, cls_type=args.cls_type)
     else:
         raise ValueError(f"Unsupported algorithm {args.algo!r}.")
 
