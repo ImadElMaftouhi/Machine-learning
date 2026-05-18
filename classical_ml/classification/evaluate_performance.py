@@ -458,7 +458,7 @@ def exp_scalability(cls_type):
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Entry point
+# Logistic Regression Entry point
 # ──────────────────────────────────────────────────────────────────────────────
 
 def evaluate_LogisticRegression(cls_type: str = "binary") -> None:
@@ -491,30 +491,287 @@ def evaluate_LogisticRegression(cls_type: str = "binary") -> None:
     print("\nDone.")
     plt.show()
 
-def evaluate_KNN(cls_type: str = "binary") -> None:
-    X, y = _make_dataset(cls_type, n_samples=1000, n_features=20, n_informative=10, class_sep=1.0, noise_flip=0.05)
-    X_tr, X_te, y_tr, y_te = _split_scale(X, y)
-    
-    model = KNN(k=5)
-    model.fit(X_tr, y_tr)
-    pred = model.predict(X_te)
-    
-    classes = np.unique(y_te)
-    average = "binary" if cls_type == "binary" else "weighted"
-    
-    acc  = accuracy_score(y_te, pred)
-    prec = precision_score(y_te, pred, average=average)
-    rec  = recall_score(y_te, pred, average=average)
-    f1   = f1_score(y_te, pred, average=average)
-    cm   = confusion_matrix(y_te, pred)
+# ──────────────────────────────────────────────────────────────────────────────
+# KNN helpers
+# ──────────────────────────────────────────────────────────────────────────────
 
-    print(f"\n--- KNN Evaluation ({cls_type}) ---")
-    print(f"Accuracy  : {acc:.4f}")
-    print(f"Precision : {prec:.4f}")
-    print(f"Recall    : {rec:.4f}")
-    print(f"F1 Score  : {f1:.4f}")
-    print(f"\nConfusion Matrix:\n{cm}")
-    print(f"\nDetailed Report:\n{classification_report(y_te, pred)}")
+def _knn_eval(cls_type: str, model: KNN, X_tr, y_tr, X_te, y_te) -> dict:
+    """Fit-then-evaluate helper for KNN. Records predict time instead of fit time."""
+    model.fit(X_tr, y_tr)
+    t0    = perf_counter()
+    proba = model.predict_proba(X_te)
+    pred_time = perf_counter() - t0
+    pred  = model.predict(X_te)
+    return {"pred_time": pred_time,
+            **_compute_metrics(cls_type, y_te, pred, proba),
+            "proba": proba, "pred": pred}
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# KNN Experiment 1 – k sweep (bias-variance tradeoff)
+# ──────────────────────────────────────────────────────────────────────────────
+
+def exp_knn_k_sweep(cls_type: str, k_max: int = 40):
+    """
+    Vary k from 1 to k_max and track train/test accuracy plus AUC and F1.
+    Small k → high variance (overfits noise).
+    Large k → high bias (decision boundary too smooth).
+    """
+    X, y = _make_dataset(cls_type, n_samples=1500)
+    X_tr, X_te, y_tr, y_te = _split_scale(X, y)
+
+    k_grid = list(range(1, k_max + 1))
+    train_accs, test_accs, test_f1s, test_aucs = [], [], [], []
+
+    for k in k_grid:
+        m = KNN(k=k)
+        m.fit(X_tr, y_tr)
+        train_accs.append(m.score(X_tr, y_tr))
+        proba   = m.predict_proba(X_te)
+        pred    = m.predict(X_te)
+        metrics = _compute_metrics(cls_type, y_te, pred, proba)
+        test_accs.append(metrics["accuracy"])
+        test_f1s.append(metrics["f1"])
+        test_aucs.append(metrics["roc_auc"])
+
+    best_k = k_grid[int(np.argmax(test_f1s))]
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+
+    ax = axes[0]
+    ax.plot(k_grid, train_accs, ls="--", label="Train accuracy")
+    ax.plot(k_grid, test_accs,  label="Test accuracy")
+    ax.axvline(best_k, color="red", ls=":", alpha=0.7, label=f"Best k={best_k}")
+    ax.fill_between(k_grid,
+                    [tr - te for tr, te in zip(train_accs, test_accs)],
+                    alpha=0.08, color="red", label="Overfit gap")
+    ax.set(xlabel="k", ylabel="Accuracy", title="Train vs. test accuracy — variance at k=1")
+    ax.legend(fontsize=9)
+
+    ax = axes[1]
+    ax.plot(k_grid, test_f1s,  marker=".", ms=4, label="F1 (macro)")
+    ax.plot(k_grid, test_aucs, marker=".", ms=4, label="ROC-AUC")
+    ax.axvline(best_k, color="red", ls=":", alpha=0.7, label=f"Best k={best_k}")
+    ax.set(xlabel="k", ylabel="Score", title="Test metrics vs. k")
+    ax.legend(fontsize=9)
+
+    fig.suptitle(f"KNN Exp 1 · k sweep  [{cls_type}]", fontsize=13, fontweight="bold")
+    fig.tight_layout()
+    return fig
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# KNN Experiment 2 – distance metric + weighting comparison
+# ──────────────────────────────────────────────────────────────────────────────
+
+def exp_knn_distance_comparison(cls_type: str, k: int = 5):
+    """Compare euclidean / manhattan / cosine and uniform / distance weighting."""
+    X, y = _make_dataset(cls_type, n_samples=1500)
+    X_tr, X_te, y_tr, y_te = _split_scale(X, y)
+
+    distances   = ["euclidean", "manhattan", "cosine"]
+    weight_opts = ["uniform", "distance"]
+    metric_cols = ["accuracy", "f1", "roc_auc"]
+    palette     = sns.color_palette("muted", len(distances))
+
+    # ── left: metric comparison by distance ──
+    results_dist: dict[str, dict] = {}
+    for dist in distances:
+        m = KNN(k=k, distance=dist)
+        r = _knn_eval(cls_type, m, X_tr, y_tr, X_te, y_te)
+        results_dist[dist] = r
+
+    # ── right: uniform vs distance-weighted ──
+    results_w: dict[str, dict] = {}
+    for w in weight_opts:
+        m = KNN(k=k, weights=w)
+        r = _knn_eval(cls_type, m, X_tr, y_tr, X_te, y_te)
+        results_w[w] = r
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+
+    ax  = axes[0]
+    x   = np.arange(len(metric_cols))
+    bar_w = 0.25
+    for i, dist in enumerate(distances):
+        vals = [results_dist[dist][mc] for mc in metric_cols]
+        bars = ax.bar(x + i * bar_w, vals, width=bar_w, label=dist, color=palette[i])
+        for bar, v in zip(bars, vals):
+            ax.text(bar.get_x() + bar.get_width() / 2, v + 0.005,
+                    f"{v:.2f}", ha="center", va="bottom", fontsize=7)
+    ax.set_xticks(x + bar_w)
+    ax.set_xticklabels(metric_cols)
+    ax.set(ylabel="Score", ylim=(0, 1.1),
+           title=f"Distance metric comparison  (k={k})")
+    ax.legend()
+
+    ax   = axes[1]
+    x2   = np.arange(len(metric_cols))
+    bar_w2 = 0.35
+    pal2 = sns.color_palette("muted", 2)
+    for i, w in enumerate(weight_opts):
+        vals = [results_w[w][mc] for mc in metric_cols]
+        bars = ax.bar(x2 + i * bar_w2, vals, width=bar_w2, label=w, color=pal2[i])
+        for bar, v in zip(bars, vals):
+            ax.text(bar.get_x() + bar.get_width() / 2, v + 0.005,
+                    f"{v:.2f}", ha="center", va="bottom", fontsize=7)
+    ax.set_xticks(x2 + bar_w2 / 2)
+    ax.set_xticklabels(metric_cols)
+    ax.set(ylabel="Score", ylim=(0, 1.1),
+           title=f"Uniform vs. distance-weighted voting  (k={k})")
+    ax.legend()
+
+    fig.suptitle(f"KNN Exp 2 · Distance & weighting  [{cls_type}]",
+                 fontsize=13, fontweight="bold")
+    fig.tight_layout()
+    return fig
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# KNN Experiment 3 – confusion matrix + cross-validated metrics
+# ──────────────────────────────────────────────────────────────────────────────
+
+def exp_knn_confusion(cls_type: str, k: int = 5):
+    X, y = _make_dataset(cls_type, n_samples=2000)
+    X_tr, X_te, y_tr, y_te = _split_scale(X, y)
+    r       = _knn_eval(cls_type, KNN(k=k), X_tr, y_tr, X_te, y_te)
+    pred    = r["pred"]
+    classes = np.unique(y_te)
+
+    # Cross-validation
+    n_splits    = 8
+    metric_names = ["accuracy", "f1", "roc_auc"]
+    fold_scores  = {m: [] for m in metric_names}
+    X_sc = StandardScaler().fit_transform(X)
+    skf  = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=SEED)
+    for tr_idx, te_idx in skf.split(X_sc, y):
+        m = KNN(k=k)
+        m.fit(X_sc[tr_idx], y[tr_idx])
+        proba_cv = m.predict_proba(X_sc[te_idx])
+        pred_cv  = m.predict(X_sc[te_idx])
+        cv_m = _compute_metrics(cls_type, y[te_idx], pred_cv, proba_cv)
+        for name in metric_names:
+            fold_scores[name].append(cv_m[name])
+
+    fig, axes = plt.subplots(1, 2, figsize=(13, 5))
+    palette   = sns.color_palette("muted", len(metric_names))
+
+    # Confusion matrix
+    ax = axes[0]
+    cm      = confusion_matrix(y_te, pred, labels=classes)
+    cm_norm = cm.astype(float) / cm.sum(axis=1, keepdims=True)
+    sns.heatmap(cm_norm, annot=True, fmt=".2%", cmap="Blues",
+                xticklabels=[str(c) for c in classes],
+                yticklabels=[str(c) for c in classes],
+                ax=ax, linewidths=0.5)
+    for (i, j), raw in np.ndenumerate(cm):
+        ax.text(j + 0.5, i + 0.72, f"n={raw}", ha="center", va="center",
+                fontsize=7, color="gray")
+    ax.set(title=f"Confusion matrix  (k={k})", xlabel="Predicted", ylabel="True")
+
+    # CV bar chart with CI
+    ax    = axes[1]
+    means = [np.mean(fold_scores[m]) for m in metric_names]
+    cis   = [stats.t.interval(0.95, df=n_splits - 1,
+                               loc=np.mean(fold_scores[m]),
+                               scale=stats.sem(fold_scores[m]))
+             for m in metric_names]
+    errs  = [mu - ci[0] for mu, ci in zip(means, cis)]
+    bars  = ax.bar(metric_names, means, yerr=errs, capsize=6,
+                   color=palette, edgecolor="white")
+    ax.set(ylabel="Score", title=f"{n_splits}-fold CV — mean ± 95% CI",
+           ylim=(0, 1.05))
+    for bar, mu in zip(bars, means):
+        ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.005,
+                f"{mu:.3f}", ha="center", va="bottom", fontsize=9)
+
+    fig.suptitle(f"KNN Exp 3 · Confusion & CV  [{cls_type}]",
+                 fontsize=13, fontweight="bold")
+    fig.tight_layout()
+    return fig
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# KNN Experiment 4 – scalability (predict time, not fit time)
+# ──────────────────────────────────────────────────────────────────────────────
+
+def exp_knn_scalability(cls_type: str, k: int = 5):
+    """
+    KNN fit is O(1) — just stores data.
+    Predict is O(n_train * d) per query, so predict time is what scales badly.
+    """
+    sample_grid  = [100, 500, 1000, 3000, 5000]
+    feature_grid = [5, 10, 20, 50, 100]
+    n_cls = N_CLASSES[cls_type]
+
+    pred_time_mat = np.zeros((len(sample_grid), len(feature_grid)))
+    auc_mat       = np.zeros_like(pred_time_mat)
+
+    for i, n in enumerate(sample_grid):
+        for j, d in enumerate(feature_grid):
+            n_inf = max(n_cls, min(d, d // 2))
+            X, y  = _make_dataset(cls_type, n_samples=n, n_features=d,
+                                  n_informative=n_inf)
+            X_tr, X_te, y_tr, y_te = _split_scale(X, y)
+            m = KNN(k=k)
+            m.fit(X_tr, y_tr)
+            t0    = perf_counter()
+            proba = m.predict_proba(X_te)
+            pred_time_mat[i, j] = perf_counter() - t0
+            pred = m.predict(X_te)
+            auc_mat[i, j] = _compute_metrics(cls_type, y_te, pred, proba)["roc_auc"]
+
+    row_labels = [str(n) for n in sample_grid]
+    col_labels = [str(d) for d in feature_grid]
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+    sns.heatmap(pred_time_mat, annot=True, fmt=".3f", cmap="YlOrRd",
+                xticklabels=col_labels, yticklabels=row_labels,
+                ax=axes[0], linewidths=0.4)
+    axes[0].set(xlabel="n_features", ylabel="n_train_samples",
+                title="Predict time (s)  — grows with n_train × d")
+
+    sns.heatmap(auc_mat, annot=True, fmt=".3f", cmap="Blues",
+                xticklabels=col_labels, yticklabels=row_labels,
+                ax=axes[1], linewidths=0.4, vmin=0.5, vmax=1.0)
+    axes[1].set(xlabel="n_features", ylabel="n_train_samples", title="ROC-AUC")
+
+    fig.suptitle(f"KNN Exp 4 · Scalability  [{cls_type}]",
+                 fontsize=13, fontweight="bold")
+    fig.tight_layout()
+    return fig
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# KNN entry point
+# ──────────────────────────────────────────────────────────────────────────────
+
+def evaluate_KNN(cls_type: str = "binary") -> None:
+    if cls_type not in VALID_TYPES:
+        raise ValueError(f"cls_type must be one of {VALID_TYPES}. Got {cls_type!r}.")
+    if cls_type == "all":
+        for t in VALID_TYPES[:-1]:
+            evaluate_KNN(cls_type=t)
+        return
+
+    print(f"Evaluating KNN  [type={cls_type}]  ({N_CLASSES[cls_type]} classes)\n")
+
+    experiments = [
+        ("k sweep",                    lambda: exp_knn_k_sweep(cls_type)),
+        ("Distance & weighting",       lambda: exp_knn_distance_comparison(cls_type)),
+        ("Confusion & CV",             lambda: exp_knn_confusion(cls_type)),
+        ("Scalability",                lambda: exp_knn_scalability(cls_type)),
+    ]
+
+    for name, fn in experiments:
+        print(f"  -> {name} …")
+        fig = fn()
+        # fname = f"eval_knn_{cls_type}_{name.lower().replace(' & ', '_').replace(' ', '_')}.png"
+        # fig.savefig(fname, dpi=140, bbox_inches="tight")
+        # print(f"     saved {fname}")
+
+    print("\nDone.")
+    plt.show()
 
 def main():
     parser = argparse.ArgumentParser(
