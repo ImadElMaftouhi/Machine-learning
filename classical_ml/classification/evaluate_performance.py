@@ -19,6 +19,7 @@ from logistic_regression import LogisticRegression
 from knn import KNN
 from naive_bayes import BernoulliNB, MultinomialNB, GaussianNB
 from decision_tree import DecisionTree, Node
+from perceptron import Perceptron
 
 sns.set_theme(style="whitegrid", palette="muted")
 SEED = 42
@@ -1183,6 +1184,290 @@ def evaluate_NaiveBayes(nb_variant: str = "gaussian", cls_type: str = "binary") 
 
 
 # ----------------------
+# Perceptron helpers
+# ----------------------
+
+def _new_perceptron_model(**kwargs) -> Perceptron:
+    return Perceptron(**kwargs)
+
+
+def _perceptron_eval(cls_type: str, model: Perceptron,
+                     X_tr, y_tr, X_te, y_te) -> dict:
+    """Fit-then-evaluate helper for Perceptron. Records fit time."""
+    t0 = perf_counter()
+    model.fit(X_tr, y_tr)
+    fit_time = perf_counter() - t0
+    proba = model.predict_proba(X_te)
+    pred  = model.predict(X_te)
+    return {"fit_time": fit_time,
+            **_compute_metrics(cls_type, y_te, pred, proba),
+            "proba": proba, "pred": pred, "model": model}
+
+
+# ----------------------
+# Perceptron Experiment 1 – convergence on separable vs noisy data
+# ----------------------
+
+def exp_perceptron_convergence(cls_type: str) -> mplfig.Figure:
+    """
+    The perceptron convergence theorem: errors→0 in finite epochs iff data is
+    linearly separable. We sweep `flip_y` (label noise) to break separability
+    and watch the per-epoch mistake count fail to converge.
+    """
+    noise_levels = [0.0, 0.02, 0.05, 0.15]
+    palette      = sns.color_palette("muted", len(noise_levels))
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+
+    for ax, yscale in zip(axes, ("linear", "log")):
+        for color, nf in zip(palette, noise_levels):
+            X, y = _make_dataset(cls_type, n_samples=800, class_sep=1.5,
+                                 noise_flip=nf)
+            X_tr, X_te, y_tr, y_te = _split_scale(X, y)
+            m = Perceptron(lr=1.0, n_iter=80).fit(X_tr, y_tr)
+            curve = (m.errors_per_epoch_
+                     if m._ovr is None
+                     else np.mean([e.errors_per_epoch_  # type: ignore[attr-defined]
+                                   for e in m._ovr.estimators_], axis=0))
+            ax.plot(curve, label=f"flip_y={nf}", color=color)
+        ax.set_yscale(yscale)
+        ax.set(xlabel="Epoch",
+               ylabel="Mistakes per epoch" + (" (log)" if yscale == "log" else ""),
+               title=f"Convergence — {yscale}")
+        ax.legend(fontsize=9)
+
+    fig.suptitle(f"Perceptron Exp 1 · Convergence  [{cls_type}]",
+                 fontsize=13, fontweight="bold")
+    fig.tight_layout()
+    return fig
+
+
+# ----------------------
+# Perceptron Experiment 2 – decision-boundary evolution (2D toy data)
+# ----------------------
+
+def exp_perceptron_boundary_evolution(cls_type: str) -> mplfig.Figure:
+    """
+    Snapshot the decision hyperplane after 1, 5, 25, 100 epochs on a
+    2D linearly-separable dataset to visualize how the boundary tightens.
+    Always uses a 2-class projection so the picture is meaningful.
+    """
+    X, y = make_classification(
+        n_samples=400, n_features=2, n_informative=2, n_redundant=0,
+        n_clusters_per_class=1, n_classes=2, class_sep=1.8,
+        flip_y=0.0, random_state=SEED,
+    )
+    X_tr, X_te, y_tr, y_te = _split_scale(X, y)
+
+    epochs = [1, 5, 25, 100]
+    fig, axes = plt.subplots(1, len(epochs), figsize=(4.2 * len(epochs), 4.5),
+                             sharex=True, sharey=True)
+    palette = sns.color_palette("muted", 2)
+
+    xs = np.linspace(X_tr[:, 0].min() - 0.5, X_tr[:, 0].max() + 0.5, 200)
+    ys = np.linspace(X_tr[:, 1].min() - 0.5, X_tr[:, 1].max() + 0.5, 200)
+    XX, YY = np.meshgrid(xs, ys)
+    grid   = np.column_stack([XX.ravel(), YY.ravel()])
+
+    for ax, n_ep in zip(axes, epochs):
+        m = Perceptron(lr=1.0, n_iter=n_ep, shuffle=True).fit(X_tr, y_tr)
+        ZZ = m.decision_function(grid).reshape(XX.shape)
+        ax.contourf(XX, YY, ZZ, levels=[-1e9, 0, 1e9],
+                    colors=[palette[0], palette[1]], alpha=0.15)
+        ax.contour(XX, YY, ZZ, levels=[0], colors="black", linewidths=1.5)
+        for cls, color in zip([0, 1], palette):
+            mask = y_tr == cls
+            ax.scatter(X_tr[mask, 0], X_tr[mask, 1], color=color,
+                       s=16, edgecolor="white", linewidth=0.4)
+        mistakes_final = m.errors_per_epoch_[-1] if m.errors_per_epoch_ else 0
+        ax.set(title=f"epoch={n_ep}  (last mistakes={mistakes_final})",
+               xticks=[], yticks=[])
+
+    fig.suptitle("Perceptron Exp 2 · Decision boundary evolution  [binary 2D]",
+                 fontsize=13, fontweight="bold")
+    fig.tight_layout()
+    return fig
+
+
+# ----------------------
+# Perceptron Experiment 3 – learning-rate sensitivity
+# ----------------------
+
+def exp_perceptron_lr_sensitivity(cls_type: str) -> mplfig.Figure:
+    """
+    Classic perceptron theory: on separable data, *any* positive learning rate
+    converges to a separator (lr just rescales w & b). Final accuracy should
+    be invariant to lr — only the convergence trajectory shifts.
+    """
+    lr_grid = [0.001, 0.01, 0.1, 1.0, 10.0]
+    palette = sns.color_palette("muted", len(lr_grid))
+
+    X, y = _make_dataset(cls_type, n_samples=1500, class_sep=1.6, noise_flip=0.02)
+    X_tr, X_te, y_tr, y_te = _split_scale(X, y)
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+
+    final_accs = []
+    for color, lr in zip(palette, lr_grid):
+        m = Perceptron(lr=lr, n_iter=80).fit(X_tr, y_tr)
+        curve = (m.errors_per_epoch_
+                 if m._ovr is None
+                 else np.mean([e.errors_per_epoch_  # type: ignore[attr-defined]
+                               for e in m._ovr.estimators_], axis=0))
+        axes[0].plot(curve, label=f"lr={lr}", color=color)
+        final_accs.append(accuracy_score(y_te, m.predict(X_te)))
+
+    axes[0].set(xlabel="Epoch", ylabel="Mistakes per epoch",
+                title="Convergence trajectory across learning rates")
+    axes[0].legend(fontsize=9)
+
+    bars = axes[1].bar([f"{lr:g}" for lr in lr_grid], final_accs,
+                       color=palette, edgecolor="white", width=0.6)
+    for bar, v in zip(bars, final_accs):
+        axes[1].text(bar.get_x() + bar.get_width() / 2, v + 0.005,
+                     f"{v:.3f}", ha="center", va="bottom", fontsize=9)
+    axes[1].set(xlabel="lr", ylabel="Test accuracy", ylim=(0, 1.1),
+                title="Final accuracy invariant under lr (separable case)")
+
+    fig.suptitle(f"Perceptron Exp 3 · Learning-rate sensitivity  [{cls_type}]",
+                 fontsize=13, fontweight="bold")
+    fig.tight_layout()
+    return fig
+
+
+# ----------------------
+# Perceptron Experiment 4 – non-linear separability (vs LogReg)
+# ----------------------
+
+def exp_perceptron_nonlinear(cls_type: str) -> mplfig.Figure:
+    """
+    Perceptron is a *linear* classifier. On non-linearly-separable data
+    (moons) it can never reach zero error. Plot it alongside LogReg on the
+    same data to show this is a model-class limit, not just an optimization
+    issue — LogReg is *also* linear and bottoms out at the same accuracy.
+    """
+    from sklearn.datasets import make_moons
+    X, y = make_moons(n_samples=800, noise=0.20, random_state=SEED)
+    X_tr, X_te, y_tr, y_te = _split_scale(X, y)
+
+    perc = Perceptron(lr=1.0, n_iter=200).fit(X_tr, y_tr)
+    lr   = LogisticRegression(lr=0.05, n_iter=500, type="binary").fit(X_tr, y_tr)
+
+    perc_acc = accuracy_score(y_te, perc.predict(X_te))
+    lr_acc   = accuracy_score(y_te, lr.predict(X_te))
+
+    fig, axes = plt.subplots(1, 3, figsize=(16, 5))
+
+    xs = np.linspace(X_tr[:, 0].min() - 0.5, X_tr[:, 0].max() + 0.5, 200)
+    ys = np.linspace(X_tr[:, 1].min() - 0.5, X_tr[:, 1].max() + 0.5, 200)
+    XX, YY = np.meshgrid(xs, ys)
+    grid   = np.column_stack([XX.ravel(), YY.ravel()])
+    palette = sns.color_palette("muted", 2)
+
+    for ax, model, title, acc in [
+        (axes[0], perc, "Perceptron", perc_acc),
+        (axes[1], lr,   "LogReg",     lr_acc),
+    ]:
+        ZZ = model.decision_function(grid).reshape(XX.shape) \
+            if hasattr(model, "decision_function") \
+            else (model.predict_proba(grid) - 0.5).reshape(XX.shape)
+        ax.contourf(XX, YY, ZZ, levels=[-1e9, 0, 1e9],
+                    colors=[palette[0], palette[1]], alpha=0.15)
+        ax.contour(XX, YY, ZZ, levels=[0], colors="black", linewidths=1.5)
+        for cls, color in zip([0, 1], palette):
+            mask = y_tr == cls
+            ax.scatter(X_tr[mask, 0], X_tr[mask, 1], color=color, s=14,
+                       edgecolor="white", linewidth=0.4)
+        ax.set(title=f"{title}  (acc={acc:.3f})", xticks=[], yticks=[])
+
+    # Perceptron mistake-per-epoch — fails to reach 0
+    axes[2].plot(perc.errors_per_epoch_, color="crimson", lw=2)
+    axes[2].axhline(0, color="black", ls="--", alpha=0.5)
+    axes[2].set(xlabel="Epoch", ylabel="Mistakes per epoch",
+                title="Perceptron mistakes — never reaches 0 on moons")
+
+    fig.suptitle("Perceptron Exp 4 · Non-linear separability (moons)",
+                 fontsize=13, fontweight="bold")
+    fig.tight_layout()
+    return fig
+
+
+# ----------------------
+# Perceptron Experiment 5 – OvR scalability with K
+# ----------------------
+
+def exp_perceptron_ovr_scalability(cls_type: str) -> mplfig.Figure:
+    """
+    OvR fits K binary perceptrons. Cost ∝ K. Accuracy typically degrades with K
+    because (a) per-class imbalance grows (1/K positives) and (b) the unscored
+    "tie" regions between class hyperplanes grow.
+    """
+    k_grid = [2, 3, 4, 5, 7, 10]
+    fit_times, accs = [], []
+
+    for K in k_grid:
+        n_inf = max(K, 8)
+        X, y = make_classification(
+            n_samples=2000, n_features=10, n_informative=n_inf,
+            n_redundant=0, n_clusters_per_class=1, n_classes=K,
+            class_sep=1.3, flip_y=0.02, random_state=SEED,
+        )
+        X_tr, X_te, y_tr, y_te = _split_scale(X, y)
+
+        t0 = perf_counter()
+        m  = Perceptron(lr=1.0, n_iter=80).fit(X_tr, y_tr)
+        fit_times.append(perf_counter() - t0)
+        accs.append(accuracy_score(y_te, m.predict(X_te)))
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+
+    axes[0].plot(k_grid, fit_times, marker="o", color="darkorange")
+    axes[0].set(xlabel="# classes (K)", ylabel="Fit time (s)",
+                title="Fit time ~ linear in K (OvR fits K perceptrons)")
+
+    axes[1].plot(k_grid, accs, marker="s", color="steelblue")
+    axes[1].set(xlabel="# classes (K)", ylabel="Test accuracy",
+                ylim=(0, 1.05),
+                title="Accuracy typically drops as K grows (imbalance + ties)")
+
+    fig.suptitle("Perceptron Exp 5 · OvR scalability with K",
+                 fontsize=13, fontweight="bold")
+    fig.tight_layout()
+    return fig
+
+
+# ----------------------
+# Perceptron entry point
+# ----------------------
+
+def evaluate_Perceptron(cls_type: str = "binary") -> None:
+    if cls_type not in VALID_TYPES:
+        raise ValueError(f"cls_type must be one of {VALID_TYPES}. Got {cls_type!r}.")
+    if cls_type == "all":
+        for t in VALID_TYPES[:-1]:
+            evaluate_Perceptron(cls_type=t)
+        return
+
+    print(f"Evaluating Perceptron  [type={cls_type}]  "
+          f"({N_CLASSES[cls_type]} classes)\n")
+
+    experiments = [
+        ("Convergence",                  lambda: exp_perceptron_convergence(cls_type)),
+        ("Boundary evolution (2D)",      lambda: exp_perceptron_boundary_evolution(cls_type)),
+        ("Learning-rate sensitivity",    lambda: exp_perceptron_lr_sensitivity(cls_type)),
+        ("Non-linear separability",      lambda: exp_perceptron_nonlinear(cls_type)),
+        ("OvR scalability with K",       lambda: exp_perceptron_ovr_scalability(cls_type)),
+    ]
+
+    for name, fn in experiments:
+        print(f"  -> {name} …")
+        fig = fn()
+
+    print("\nDone.")
+    plt.show()
+
+
+# ----------------------
 # Decision Tree helpers
 # ----------------------
 
@@ -1549,7 +1834,8 @@ def main():
     )
     parser.add_argument(
         "--algo", default="logistic_regression",
-        choices=["logistic_regression", "knn", "naive_bayes", "decision_tree"],
+        choices=["logistic_regression", "knn", "naive_bayes",
+                 "decision_tree", "perceptron"],
         help="Algorithm to evaluate.",
     )
     parser.add_argument(
@@ -1572,6 +1858,8 @@ def main():
         evaluate_NaiveBayes(nb_variant=args.nb_variant, cls_type=args.cls_type)
     elif args.algo == "decision_tree":
         evaluate_DecisionTree(cls_type=args.cls_type)
+    elif args.algo == "perceptron":
+        evaluate_Perceptron(cls_type=args.cls_type)
     else:
         raise ValueError(f"Unsupported algorithm {args.algo!r}.")
 
