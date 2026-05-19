@@ -2,6 +2,7 @@ import numpy as np
 import scipy.stats as stats
 import matplotlib.pyplot as plt
 import matplotlib.figure as mplfig
+import matplotlib.patches as mpatches
 import seaborn as sns
 import argparse
 
@@ -18,6 +19,11 @@ from time import perf_counter
 from logistic_regression import LogisticRegression
 from knn import KNN
 from naive_bayes import BernoulliNB, MultinomialNB, GaussianNB
+from decision_tree import DecisionTree, Node
+from perceptron import Perceptron
+from discriminant_analysis import LDA, QDA
+from random_forest import RandomForest
+from svm import SVM
 
 sns.set_theme(style="whitegrid", palette="muted")
 SEED = 42
@@ -1181,6 +1187,1629 @@ def evaluate_NaiveBayes(nb_variant: str = "gaussian", cls_type: str = "binary") 
     plt.show()
 
 
+# ----------------------
+# Perceptron helpers
+# ----------------------
+
+def _new_perceptron_model(**kwargs) -> Perceptron:
+    return Perceptron(**kwargs)
+
+
+def _perceptron_eval(cls_type: str, model: Perceptron,
+                     X_tr, y_tr, X_te, y_te) -> dict:
+    """Fit-then-evaluate helper for Perceptron. Records fit time."""
+    t0 = perf_counter()
+    model.fit(X_tr, y_tr)
+    fit_time = perf_counter() - t0
+    proba = model.predict_proba(X_te)
+    pred  = model.predict(X_te)
+    return {"fit_time": fit_time,
+            **_compute_metrics(cls_type, y_te, pred, proba),
+            "proba": proba, "pred": pred, "model": model}
+
+
+# ----------------------
+# Perceptron Experiment 1 – convergence on separable vs noisy data
+# ----------------------
+
+def exp_perceptron_convergence(cls_type: str) -> mplfig.Figure:
+    """
+    The perceptron convergence theorem: errors→0 in finite epochs iff data is
+    linearly separable. We sweep `flip_y` (label noise) to break separability
+    and watch the per-epoch mistake count fail to converge.
+    """
+    noise_levels = [0.0, 0.02, 0.05, 0.15]
+    palette      = sns.color_palette("muted", len(noise_levels))
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+
+    for ax, yscale in zip(axes, ("linear", "log")):
+        for color, nf in zip(palette, noise_levels):
+            X, y = _make_dataset(cls_type, n_samples=800, class_sep=1.5,
+                                 noise_flip=nf)
+            X_tr, X_te, y_tr, y_te = _split_scale(X, y)
+            m = Perceptron(lr=1.0, n_iter=80).fit(X_tr, y_tr)
+            curve = (m.errors_per_epoch_
+                     if m._ovr is None
+                     else np.mean([e.errors_per_epoch_  # type: ignore[attr-defined]
+                                   for e in m._ovr.estimators_], axis=0))
+            ax.plot(curve, label=f"flip_y={nf}", color=color)
+        ax.set_yscale(yscale)
+        ax.set(xlabel="Epoch",
+               ylabel="Mistakes per epoch" + (" (log)" if yscale == "log" else ""),
+               title=f"Convergence — {yscale}")
+        ax.legend(fontsize=9)
+
+    fig.suptitle(f"Perceptron Exp 1 · Convergence  [{cls_type}]",
+                 fontsize=13, fontweight="bold")
+    fig.tight_layout()
+    return fig
+
+
+# ----------------------
+# Perceptron Experiment 2 – decision-boundary evolution (2D toy data)
+# ----------------------
+
+def exp_perceptron_boundary_evolution(cls_type: str) -> mplfig.Figure:
+    """
+    Snapshot the decision hyperplane after 1, 5, 25, 100 epochs on a
+    2D linearly-separable dataset to visualize how the boundary tightens.
+    Always uses a 2-class projection so the picture is meaningful.
+    """
+    X, y = make_classification(
+        n_samples=400, n_features=2, n_informative=2, n_redundant=0,
+        n_clusters_per_class=1, n_classes=2, class_sep=1.8,
+        flip_y=0.0, random_state=SEED,
+    )
+    X_tr, X_te, y_tr, y_te = _split_scale(X, y)
+
+    epochs = [1, 5, 25, 100]
+    fig, axes = plt.subplots(1, len(epochs), figsize=(4.2 * len(epochs), 4.5),
+                             sharex=True, sharey=True)
+    palette = sns.color_palette("muted", 2)
+
+    xs = np.linspace(X_tr[:, 0].min() - 0.5, X_tr[:, 0].max() + 0.5, 200)
+    ys = np.linspace(X_tr[:, 1].min() - 0.5, X_tr[:, 1].max() + 0.5, 200)
+    XX, YY = np.meshgrid(xs, ys)
+    grid   = np.column_stack([XX.ravel(), YY.ravel()])
+
+    for ax, n_ep in zip(axes, epochs):
+        m = Perceptron(lr=1.0, n_iter=n_ep, shuffle=True).fit(X_tr, y_tr)
+        ZZ = m.decision_function(grid).reshape(XX.shape)
+        ax.contourf(XX, YY, ZZ, levels=[-1e9, 0, 1e9],
+                    colors=[palette[0], palette[1]], alpha=0.15)
+        ax.contour(XX, YY, ZZ, levels=[0], colors="black", linewidths=1.5)
+        for cls, color in zip([0, 1], palette):
+            mask = y_tr == cls
+            ax.scatter(X_tr[mask, 0], X_tr[mask, 1], color=color,
+                       s=16, edgecolor="white", linewidth=0.4)
+        mistakes_final = m.errors_per_epoch_[-1] if m.errors_per_epoch_ else 0
+        ax.set(title=f"epoch={n_ep}  (last mistakes={mistakes_final})",
+               xticks=[], yticks=[])
+
+    fig.suptitle("Perceptron Exp 2 · Decision boundary evolution  [binary 2D]",
+                 fontsize=13, fontweight="bold")
+    fig.tight_layout()
+    return fig
+
+
+# ----------------------
+# Perceptron Experiment 3 – learning-rate sensitivity
+# ----------------------
+
+def exp_perceptron_lr_sensitivity(cls_type: str) -> mplfig.Figure:
+    """
+    Classic perceptron theory: on separable data, *any* positive learning rate
+    converges to a separator (lr just rescales w & b). Final accuracy should
+    be invariant to lr — only the convergence trajectory shifts.
+    """
+    lr_grid = [0.001, 0.01, 0.1, 1.0, 10.0]
+    palette = sns.color_palette("muted", len(lr_grid))
+
+    X, y = _make_dataset(cls_type, n_samples=1500, class_sep=1.6, noise_flip=0.02)
+    X_tr, X_te, y_tr, y_te = _split_scale(X, y)
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+
+    final_accs = []
+    for color, lr in zip(palette, lr_grid):
+        m = Perceptron(lr=lr, n_iter=80).fit(X_tr, y_tr)
+        curve = (m.errors_per_epoch_
+                 if m._ovr is None
+                 else np.mean([e.errors_per_epoch_  # type: ignore[attr-defined]
+                               for e in m._ovr.estimators_], axis=0))
+        axes[0].plot(curve, label=f"lr={lr}", color=color)
+        final_accs.append(accuracy_score(y_te, m.predict(X_te)))
+
+    axes[0].set(xlabel="Epoch", ylabel="Mistakes per epoch",
+                title="Convergence trajectory across learning rates")
+    axes[0].legend(fontsize=9)
+
+    bars = axes[1].bar([f"{lr:g}" for lr in lr_grid], final_accs,
+                       color=palette, edgecolor="white", width=0.6)
+    for bar, v in zip(bars, final_accs):
+        axes[1].text(bar.get_x() + bar.get_width() / 2, v + 0.005,
+                     f"{v:.3f}", ha="center", va="bottom", fontsize=9)
+    axes[1].set(xlabel="lr", ylabel="Test accuracy", ylim=(0, 1.1),
+                title="Final accuracy invariant under lr (separable case)")
+
+    fig.suptitle(f"Perceptron Exp 3 · Learning-rate sensitivity  [{cls_type}]",
+                 fontsize=13, fontweight="bold")
+    fig.tight_layout()
+    return fig
+
+
+# ----------------------
+# Perceptron Experiment 4 – non-linear separability (vs LogReg)
+# ----------------------
+
+def exp_perceptron_nonlinear(cls_type: str) -> mplfig.Figure:
+    """
+    Perceptron is a *linear* classifier. On non-linearly-separable data
+    (moons) it can never reach zero error. Plot it alongside LogReg on the
+    same data to show this is a model-class limit, not just an optimization
+    issue — LogReg is *also* linear and bottoms out at the same accuracy.
+    """
+    from sklearn.datasets import make_moons
+    X, y = make_moons(n_samples=800, noise=0.20, random_state=SEED)
+    X_tr, X_te, y_tr, y_te = _split_scale(X, y)
+
+    perc = Perceptron(lr=1.0, n_iter=200).fit(X_tr, y_tr)
+    lr   = LogisticRegression(lr=0.05, n_iter=500, type="binary").fit(X_tr, y_tr)
+
+    perc_acc = accuracy_score(y_te, perc.predict(X_te))
+    lr_acc   = accuracy_score(y_te, lr.predict(X_te))
+
+    fig, axes = plt.subplots(1, 3, figsize=(16, 5))
+
+    xs = np.linspace(X_tr[:, 0].min() - 0.5, X_tr[:, 0].max() + 0.5, 200)
+    ys = np.linspace(X_tr[:, 1].min() - 0.5, X_tr[:, 1].max() + 0.5, 200)
+    XX, YY = np.meshgrid(xs, ys)
+    grid   = np.column_stack([XX.ravel(), YY.ravel()])
+    palette = sns.color_palette("muted", 2)
+
+    for ax, model, title, acc in [
+        (axes[0], perc, "Perceptron", perc_acc),
+        (axes[1], lr,   "LogReg",     lr_acc),
+    ]:
+        ZZ = model.decision_function(grid).reshape(XX.shape) \
+            if hasattr(model, "decision_function") \
+            else (model.predict_proba(grid) - 0.5).reshape(XX.shape)
+        ax.contourf(XX, YY, ZZ, levels=[-1e9, 0, 1e9],
+                    colors=[palette[0], palette[1]], alpha=0.15)
+        ax.contour(XX, YY, ZZ, levels=[0], colors="black", linewidths=1.5)
+        for cls, color in zip([0, 1], palette):
+            mask = y_tr == cls
+            ax.scatter(X_tr[mask, 0], X_tr[mask, 1], color=color, s=14,
+                       edgecolor="white", linewidth=0.4)
+        ax.set(title=f"{title}  (acc={acc:.3f})", xticks=[], yticks=[])
+
+    # Perceptron mistake-per-epoch — fails to reach 0
+    axes[2].plot(perc.errors_per_epoch_, color="crimson", lw=2)
+    axes[2].axhline(0, color="black", ls="--", alpha=0.5)
+    axes[2].set(xlabel="Epoch", ylabel="Mistakes per epoch",
+                title="Perceptron mistakes — never reaches 0 on moons")
+
+    fig.suptitle("Perceptron Exp 4 · Non-linear separability (moons)",
+                 fontsize=13, fontweight="bold")
+    fig.tight_layout()
+    return fig
+
+
+# ----------------------
+# Perceptron Experiment 5 – OvR scalability with K
+# ----------------------
+
+def exp_perceptron_ovr_scalability(cls_type: str) -> mplfig.Figure:
+    """
+    OvR fits K binary perceptrons. Cost ∝ K. Accuracy typically degrades with K
+    because (a) per-class imbalance grows (1/K positives) and (b) the unscored
+    "tie" regions between class hyperplanes grow.
+    """
+    k_grid = [2, 3, 4, 5, 7, 10]
+    fit_times, accs = [], []
+
+    for K in k_grid:
+        n_inf = max(K, 8)
+        X, y = make_classification(
+            n_samples=2000, n_features=10, n_informative=n_inf,
+            n_redundant=0, n_clusters_per_class=1, n_classes=K,
+            class_sep=1.3, flip_y=0.02, random_state=SEED,
+        )
+        X_tr, X_te, y_tr, y_te = _split_scale(X, y)
+
+        t0 = perf_counter()
+        m  = Perceptron(lr=1.0, n_iter=80).fit(X_tr, y_tr)
+        fit_times.append(perf_counter() - t0)
+        accs.append(accuracy_score(y_te, m.predict(X_te)))
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+
+    axes[0].plot(k_grid, fit_times, marker="o", color="darkorange")
+    axes[0].set(xlabel="# classes (K)", ylabel="Fit time (s)",
+                title="Fit time ~ linear in K (OvR fits K perceptrons)")
+
+    axes[1].plot(k_grid, accs, marker="s", color="steelblue")
+    axes[1].set(xlabel="# classes (K)", ylabel="Test accuracy",
+                ylim=(0, 1.05),
+                title="Accuracy typically drops as K grows (imbalance + ties)")
+
+    fig.suptitle("Perceptron Exp 5 · OvR scalability with K",
+                 fontsize=13, fontweight="bold")
+    fig.tight_layout()
+    return fig
+
+
+# ----------------------
+# Perceptron entry point
+# ----------------------
+
+def evaluate_Perceptron(cls_type: str = "binary") -> None:
+    if cls_type not in VALID_TYPES:
+        raise ValueError(f"cls_type must be one of {VALID_TYPES}. Got {cls_type!r}.")
+    if cls_type == "all":
+        for t in VALID_TYPES[:-1]:
+            evaluate_Perceptron(cls_type=t)
+        return
+
+    print(f"Evaluating Perceptron  [type={cls_type}]  "
+          f"({N_CLASSES[cls_type]} classes)\n")
+
+    experiments = [
+        ("Convergence",                  lambda: exp_perceptron_convergence(cls_type)),
+        ("Boundary evolution (2D)",      lambda: exp_perceptron_boundary_evolution(cls_type)),
+        ("Learning-rate sensitivity",    lambda: exp_perceptron_lr_sensitivity(cls_type)),
+        ("Non-linear separability",      lambda: exp_perceptron_nonlinear(cls_type)),
+        ("OvR scalability with K",       lambda: exp_perceptron_ovr_scalability(cls_type)),
+    ]
+
+    for name, fn in experiments:
+        print(f"  -> {name} …")
+        fig = fn()
+
+    print("\nDone.")
+    plt.show()
+
+
+# ----------------------
+# Discriminant Analysis helpers
+# ----------------------
+
+VALID_DA_VARIANTS = ("lda", "qda", "both")
+
+
+def _new_da_model(da_variant: str, **kwargs):
+    if da_variant == "lda":
+        return LDA(**kwargs)
+    if da_variant == "qda":
+        return QDA(**kwargs)
+    raise ValueError(f"Unknown da_variant: {da_variant!r}")
+
+
+def _da_eval(cls_type: str, model, X_tr, y_tr, X_te, y_te) -> dict:
+    """Fit-then-evaluate for LDA/QDA. Records fit time."""
+    t0 = perf_counter()
+    model.fit(X_tr, y_tr)
+    fit_time = perf_counter() - t0
+    proba = model.predict_proba(X_te)
+    pred  = model.predict(X_te)
+    return {"fit_time": fit_time,
+            **_compute_metrics(cls_type, y_te, pred, proba),
+            "proba": proba, "pred": pred}
+
+
+# ----------------------
+# DA Experiment 1 — LDA vs QDA on equal vs unequal covariances (2D)
+# ----------------------
+
+def exp_da_boundary_shapes(cls_type: str) -> mplfig.Figure:
+    """
+    Two synthetic 2D scenarios:
+      A) Shared covariance across classes → LDA is the right model.
+      B) Per-class covariance differs (one wide, one rotated) → QDA wins.
+    LDA's boundary is always a line; QDA's is a conic. The bias-variance
+    contrast becomes visual.
+    """
+    rng = np.random.default_rng(SEED)
+    n_per = 200
+
+    # Scenario A — equal covariance
+    mu_a0, mu_a1 = np.array([-1.5, 0.0]), np.array([1.5, 0.0])
+    cov_a = np.array([[1.0, 0.2], [0.2, 1.0]])
+    Xa = np.vstack([rng.multivariate_normal(mu_a0, cov_a, n_per),
+                    rng.multivariate_normal(mu_a1, cov_a, n_per)])
+    ya = np.array([0] * n_per + [1] * n_per)
+
+    # Scenario B — unequal covariance
+    mu_b0, mu_b1 = np.array([0.0, 0.0]), np.array([0.0, 0.0])
+    cov_b0 = np.array([[0.5, 0.0], [0.0, 3.0]])
+    cov_b1 = np.array([[3.0, 0.0], [0.0, 0.5]])
+    Xb = np.vstack([rng.multivariate_normal(mu_b0, cov_b0, n_per),
+                    rng.multivariate_normal(mu_b1, cov_b1, n_per)])
+    yb = np.array([0] * n_per + [1] * n_per)
+
+    fig, axes = plt.subplots(2, 2, figsize=(11, 10), sharex="row", sharey="row")
+    palette = sns.color_palette("muted", 2)
+
+    for row, (X, y, title) in enumerate([
+        (Xa, ya, "Shared Σ"),
+        (Xb, yb, "Per-class Σ"),
+    ]):
+        for col, (Model, name) in enumerate([(LDA, "LDA"), (QDA, "QDA")]):
+            ax = axes[row, col]
+            model = Model().fit(X, y)
+            acc = model.score(X, y)
+            xs = np.linspace(X[:, 0].min() - 0.5, X[:, 0].max() + 0.5, 200)
+            ys = np.linspace(X[:, 1].min() - 0.5, X[:, 1].max() + 0.5, 200)
+            XX, YY = np.meshgrid(xs, ys)
+            grid   = np.column_stack([XX.ravel(), YY.ravel()])
+            ZZ = model.predict_proba(grid).reshape(XX.shape)
+            ax.contourf(XX, YY, ZZ, levels=20, cmap="RdBu", alpha=0.5)
+            ax.contour(XX, YY, ZZ, levels=[0.5], colors="black", linewidths=1.5)
+            for cls, color in zip([0, 1], palette):
+                mask = y == cls
+                ax.scatter(X[mask, 0], X[mask, 1], color=color, s=14,
+                           edgecolor="white", linewidth=0.4)
+            ax.set(title=f"{name}  ({title}, acc={acc:.3f})",
+                   xticks=[], yticks=[])
+
+    fig.suptitle("DA Exp 1 · Decision-boundary shape: LDA (linear) vs QDA (quadratic)",
+                 fontsize=13, fontweight="bold")
+    fig.tight_layout()
+    return fig
+
+
+# ----------------------
+# DA Experiment 2 — shrinkage `reg` sweep (QDA stability)
+# ----------------------
+
+def exp_da_regularization(da_variant: str, cls_type: str) -> mplfig.Figure:
+    """
+    Sweep `reg ∈ logspace(-10, 1)` on a small-sample / high-dimensional setup
+    where covariance estimates are unstable. QDA needs more regularization
+    than LDA because it estimates K times as many covariance parameters.
+    """
+    X, y = _make_dataset(cls_type, n_samples=200, n_features=30, n_informative=20)
+    X_tr, X_te, y_tr, y_te = _split_scale(X, y)
+
+    reg_grid = np.logspace(-10, 1, 25)
+    aucs, llosses = [], []
+    for r in reg_grid:
+        m = _new_da_model(da_variant, reg=r)
+        rdict = _da_eval(cls_type, m, X_tr, y_tr, X_te, y_te)
+        aucs.append(rdict["roc_auc"])
+        llosses.append(rdict["log_loss"])
+
+    best_idx = int(np.argmax(aucs))
+
+    fig, axes = plt.subplots(1, 2, figsize=(13, 5))
+
+    axes[0].semilogx(reg_grid, aucs, marker=".", ms=5)
+    axes[0].axvline(reg_grid[best_idx], color="red", ls="--",
+                    label=f"Best reg={reg_grid[best_idx]:.1e}")
+    axes[0].set(xlabel="reg", ylabel="ROC-AUC",
+                title=f"ROC-AUC vs. reg  [{da_variant.upper()}]")
+    axes[0].legend(fontsize=9)
+
+    axes[1].semilogx(reg_grid, llosses, marker=".", ms=5, color="darkorange")
+    axes[1].axvline(reg_grid[best_idx], color="red", ls="--")
+    axes[1].set(xlabel="reg", ylabel="Log-loss",
+                title=f"Log-loss vs. reg  [{da_variant.upper()}]")
+
+    fig.suptitle(f"DA Exp 2 · Shrinkage sweep  [{da_variant} · {cls_type}]",
+                 fontsize=13, fontweight="bold")
+    fig.tight_layout()
+    return fig
+
+
+# ----------------------
+# DA Experiment 3 — Gaussianity violation
+# ----------------------
+
+def exp_da_gaussianity(da_variant: str, cls_type: str) -> mplfig.Figure:
+    """
+    LDA/QDA assume each class is Gaussian. We construct two datasets with the
+    same marginal class separation but different distributions and show how
+    accuracy + calibration degrade when the Gaussianity assumption breaks.
+    """
+    # Gaussian baseline
+    X_g, y_g = _make_dataset(cls_type, n_samples=2000, n_features=10,
+                             n_informative=8)
+    Xg_tr, Xg_te, yg_tr, yg_te = _split_scale(X_g, y_g)
+
+    # Skewed: exponentiate to produce heavy-tailed lognormal-like features
+    X_ng = np.exp(X_g) - np.exp(0)         # rough zero-centering after shift
+    Xn_tr, Xn_te, yn_tr, yn_te = _split_scale(X_ng, y_g)
+
+    fig, axes = plt.subplots(1, 2, figsize=(13, 5))
+    palette = sns.color_palette("muted", 2)
+
+    # ── Metric comparison ──
+    metric_cols = ["accuracy", "f1", "roc_auc", "log_loss"]
+    res_g  = _da_eval(cls_type, _new_da_model(da_variant), Xg_tr, yg_tr, Xg_te, yg_te)
+    res_ng = _da_eval(cls_type, _new_da_model(da_variant), Xn_tr, yn_tr, Xn_te, yn_te)
+
+    ax    = axes[0]
+    x     = np.arange(len(metric_cols))
+    bar_w = 0.35
+    bars1 = ax.bar(x - bar_w/2, [res_g[m]  for m in metric_cols],
+                   width=bar_w, label="Gaussian features", color=palette[0])
+    bars2 = ax.bar(x + bar_w/2, [res_ng[m] for m in metric_cols],
+                   width=bar_w, label="Skewed (lognormal) features", color=palette[1])
+    for bars in (bars1, bars2):
+        for bar in bars:
+            v = bar.get_height()
+            ax.text(bar.get_x() + bar.get_width()/2, v + 0.01,
+                    f"{v:.2f}", ha="center", va="bottom", fontsize=7)
+    ax.set_xticks(x); ax.set_xticklabels(metric_cols)
+    ax.set(ylabel="Score", title=f"Metric degradation under non-Gaussian features  [{da_variant.upper()}]")
+    ax.legend()
+
+    # ── Feature distribution comparison (first informative feature) ──
+    axes[1].hist(X_g[:, 0],  bins=40, alpha=0.55, color=palette[0], label="Gaussian")
+    axes[1].hist(X_ng[:, 0], bins=40, alpha=0.55, color=palette[1], label="Skewed")
+    axes[1].set(xlabel="feature[0] value", ylabel="Count",
+                title="Marginal distribution of one feature")
+    axes[1].legend()
+
+    fig.suptitle(f"DA Exp 3 · Gaussianity violation  [{da_variant} · {cls_type}]",
+                 fontsize=13, fontweight="bold")
+    fig.tight_layout()
+    return fig
+
+
+# ----------------------
+# DA Experiment 4 — sample efficiency: LDA vs QDA
+# ----------------------
+
+def exp_da_sample_efficiency(cls_type: str) -> mplfig.Figure:
+    """
+    QDA has roughly K times more covariance parameters than LDA. Plot test
+    accuracy as a function of training-set size: LDA should reach its plateau
+    much earlier, while QDA needs more data to stabilize.
+    """
+    sizes = [40, 80, 160, 320, 640, 1280, 2560]
+    n_repeats = 5
+    lda_means, lda_stds, qda_means, qda_stds = [], [], [], []
+
+    base_n = max(sizes) + 400  # ensure room for the largest train + 400 test
+    X_full, y_full = _make_dataset(cls_type, n_samples=base_n, n_features=10,
+                                   n_informative=8)
+    rng = np.random.default_rng(SEED)
+
+    for n_tr in sizes:
+        accs_l, accs_q = [], []
+        for _ in range(n_repeats):
+            idx = rng.permutation(len(X_full))
+            X_tr_full, X_te = X_full[idx[:n_tr]], X_full[idx[n_tr:n_tr + 400]]
+            y_tr_full, y_te = y_full[idx[:n_tr]], y_full[idx[n_tr:n_tr + 400]]
+            if len(np.unique(y_tr_full)) < 2 or len(np.unique(y_te)) < 2:
+                continue
+            sc = StandardScaler()
+            X_tr_sc = sc.fit_transform(X_tr_full)
+            X_te_sc = sc.transform(X_te)
+            accs_l.append(LDA().fit(X_tr_sc, y_tr_full).score(X_te_sc, y_te))
+            accs_q.append(QDA().fit(X_tr_sc, y_tr_full).score(X_te_sc, y_te))
+        lda_means.append(np.mean(accs_l)); lda_stds.append(np.std(accs_l))
+        qda_means.append(np.mean(accs_q)); qda_stds.append(np.std(accs_q))
+
+    lda_means, lda_stds = np.array(lda_means), np.array(lda_stds)
+    qda_means, qda_stds = np.array(qda_means), np.array(qda_stds)
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+    ax.plot(sizes, lda_means, marker="o", label="LDA")
+    ax.fill_between(sizes, lda_means - lda_stds, lda_means + lda_stds, alpha=0.2)
+    ax.plot(sizes, qda_means, marker="s", label="QDA")
+    ax.fill_between(sizes, qda_means - qda_stds, qda_means + qda_stds, alpha=0.2)
+    ax.set_xscale("log")
+    ax.set(xlabel="Training set size", ylabel="Test accuracy",
+           title=f"Sample efficiency  [{cls_type}]")
+    ax.legend()
+
+    fig.suptitle("DA Exp 4 · LDA reaches plateau faster than QDA",
+                 fontsize=13, fontweight="bold")
+    fig.tight_layout()
+    return fig
+
+
+# ----------------------
+# DA Experiment 5 — confusion + calibration
+# ----------------------
+
+def exp_da_confusion_calibration(da_variant: str, cls_type: str) -> mplfig.Figure:
+    """
+    LDA/QDA are *generative* models with exact Gaussian posteriors → naturally
+    calibrated. Plot the reliability diagram alongside the confusion matrix —
+    contrast with NB Exp 4 which showed the diagram bent away from y=x.
+    """
+    X, y = _make_dataset(cls_type, n_samples=3000)
+    X_tr, X_te, y_tr, y_te = _split_scale(X, y)
+    r = _da_eval(cls_type, _new_da_model(da_variant), X_tr, y_tr, X_te, y_te)
+    proba, pred = r["proba"], r["pred"]
+    classes = np.unique(y_te)
+    K = len(classes)
+    palette = sns.color_palette("muted", K)
+
+    n_cols = 3 if cls_type == "ordinal" else 2
+    fig, axes = plt.subplots(1, n_cols, figsize=(6 * n_cols, 5))
+
+    # Confusion matrix
+    ax = axes[0]
+    cm      = confusion_matrix(y_te, pred, labels=classes)
+    cm_norm = cm.astype(float) / cm.sum(axis=1, keepdims=True)
+    sns.heatmap(cm_norm, annot=True, fmt=".2%", cmap="Blues",
+                xticklabels=[str(c) for c in classes],
+                yticklabels=[str(c) for c in classes],
+                ax=ax, linewidths=0.5)
+    for (i, j), raw in np.ndenumerate(cm):
+        ax.text(j + 0.5, i + 0.72, f"n={raw}", ha="center", va="center",
+                fontsize=7, color="gray")
+    ax.set(title=f"Confusion matrix  [{da_variant.upper()}]",
+           xlabel="Predicted", ylabel="True")
+
+    # Reliability diagram
+    ax     = axes[1]
+    n_bins = 10
+    bins   = np.linspace(0, 1, n_bins + 1)
+    ax.plot([0, 1], [0, 1], "k--", alpha=0.5, label="Perfect calibration")
+
+    if cls_type == "binary":
+        bin_ids   = np.digitize(proba, bins[1:-1])
+        mean_pred = [proba[bin_ids == b].mean() if (bin_ids == b).any() else np.nan for b in range(n_bins)]
+        frac_pos  = [y_te [bin_ids == b].mean() if (bin_ids == b).any() else np.nan for b in range(n_bins)]
+        ax.plot(mean_pred, frac_pos, marker="o", lw=2, label=da_variant.upper())
+    else:
+        Y_bin = np.asarray(label_binarize(y_te, classes=classes))
+        for k in range(K):
+            pk       = proba[:, k]
+            bin_ids  = np.digitize(pk, bins[1:-1])
+            mean_pred = [pk[bin_ids == b].mean()        if (bin_ids == b).any() else np.nan for b in range(n_bins)]
+            frac_pos  = [Y_bin[bin_ids == b, k].mean()  if (bin_ids == b).any() else np.nan for b in range(n_bins)]
+            ax.plot(mean_pred, frac_pos, marker="o", lw=1.5,
+                    color=palette[k], label=f"class {classes[k]}")
+
+    ax.set(xlabel="Mean predicted probability", ylabel="Fraction of positives",
+           title="Reliability — DA is typically well-calibrated",
+           xlim=(0, 1), ylim=(0, 1))
+    ax.legend(fontsize=8)
+
+    if cls_type == "ordinal":
+        ax = axes[2]
+        pred_idx = np.searchsorted(classes, pred)
+        true_idx = np.searchsorted(classes, y_te)
+        errors   = pred_idx - true_idx
+        unique_e, counts = np.unique(errors, return_counts=True)
+        ax.bar(unique_e, counts / len(errors), color="mediumpurple",
+               edgecolor="white", width=0.6)
+        ax.axvline(0, color="black", ls="--", alpha=0.5)
+        ax.set(xlabel="Predicted − True (ordinal steps)", ylabel="Proportion",
+               title=f"Ordinal error  (MAE={np.mean(np.abs(errors)):.3f})")
+        ax.set_xticks(unique_e)
+
+    fig.suptitle(f"DA Exp 5 · Confusion & calibration  [{da_variant} · {cls_type}]",
+                 fontsize=13, fontweight="bold")
+    fig.tight_layout()
+    return fig
+
+
+# ----------------------
+# Discriminant Analysis entry point
+# ----------------------
+
+def evaluate_DiscriminantAnalysis(da_variant: str = "lda",
+                                  cls_type: str = "binary") -> None:
+    if da_variant not in VALID_DA_VARIANTS:
+        raise ValueError(f"da_variant must be one of {VALID_DA_VARIANTS}. Got {da_variant!r}.")
+    if cls_type not in VALID_TYPES:
+        raise ValueError(f"cls_type must be one of {VALID_TYPES}. Got {cls_type!r}.")
+
+    if da_variant == "both":
+        for v in ("lda", "qda"):
+            evaluate_DiscriminantAnalysis(da_variant=v, cls_type=cls_type)
+        return
+    if cls_type == "all":
+        for t in VALID_TYPES[:-1]:
+            evaluate_DiscriminantAnalysis(da_variant=da_variant, cls_type=t)
+        return
+
+    print(f"Evaluating DiscriminantAnalysis  [variant={da_variant} · type={cls_type}]  "
+          f"({N_CLASSES[cls_type]} classes)\n")
+
+    experiments = [
+        ("Boundary shapes (LDA vs QDA)", lambda: exp_da_boundary_shapes(cls_type)),
+        ("Shrinkage sweep",              lambda: exp_da_regularization(da_variant, cls_type)),
+        ("Gaussianity violation",        lambda: exp_da_gaussianity(da_variant, cls_type)),
+        ("Sample efficiency",            lambda: exp_da_sample_efficiency(cls_type)),
+        ("Confusion & calibration",      lambda: exp_da_confusion_calibration(da_variant, cls_type)),
+    ]
+
+    for name, fn in experiments:
+        print(f"  -> {name} …")
+        fig = fn()
+
+    print("\nDone.")
+    plt.show()
+
+
+# ----------------------
+# Random Forest helpers
+# ----------------------
+
+def _new_rf_model(**kwargs) -> RandomForest:
+    return RandomForest(**kwargs)
+
+
+def _rf_eval(cls_type: str, model: RandomForest,
+             X_tr, y_tr, X_te, y_te) -> dict:
+    """Fit-then-evaluate helper for RandomForest. Records fit time."""
+    t0 = perf_counter()
+    model.fit(X_tr, y_tr)
+    fit_time = perf_counter() - t0
+    proba = model.predict_proba(X_te)
+    pred  = model.predict(X_te)
+    return {"fit_time": fit_time,
+            **_compute_metrics(cls_type, y_te, pred, proba),
+            "proba": proba, "pred": pred, "model": model}
+
+
+# ----------------------
+# RF Experiment 1 — n_estimators convergence
+# ----------------------
+
+def exp_rf_n_estimators(cls_type: str) -> mplfig.Figure:
+    """
+    Track test accuracy + OOB error as `n_estimators` grows. Both metrics
+    plateau — the marginal benefit of additional trees vanishes quickly.
+    OOB error is a free internal cross-validation: no held-out set required.
+    """
+    X, y = _make_dataset(cls_type, n_samples=1200)
+    X_tr, X_te, y_tr, y_te = _split_scale(X, y)
+
+    n_grid = [1, 5, 10, 25, 50, 100]
+    test_accs, oob_scores, fit_times = [], [], []
+
+    for n in n_grid:
+        t0 = perf_counter()
+        m = RandomForest(n_estimators=n, max_depth=6,
+                         oob_score=True).fit(X_tr, y_tr)
+        fit_times.append(perf_counter() - t0)
+        test_accs.append(accuracy_score(y_te, m.predict(X_te)))
+        oob_scores.append(m.oob_score_)
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+
+    ax = axes[0]
+    ax.plot(n_grid, test_accs,  marker="o", label="Test accuracy")
+    ax.plot(n_grid, oob_scores, marker="s", ls="--", label="OOB score")
+    ax.set_xscale("log")
+    ax.set(xlabel="n_estimators", ylabel="Score",
+           title="Accuracy plateaus quickly with more trees")
+    ax.legend()
+
+    ax = axes[1]
+    ax.plot(n_grid, fit_times, marker="o", color="darkorange")
+    ax.set_xscale("log")
+    ax.set(xlabel="n_estimators", ylabel="Fit time (s)",
+           title="Fit time grows linearly in n_estimators")
+
+    fig.suptitle(f"RF Exp 1 · n_estimators convergence  [{cls_type}]",
+                 fontsize=13, fontweight="bold")
+    fig.tight_layout()
+    return fig
+
+
+# ----------------------
+# RF Experiment 2 — max_features comparison
+# ----------------------
+
+def exp_rf_max_features(cls_type: str) -> mplfig.Figure:
+    """
+    Compare `sqrt`, `log2`, and `all` (= bagging, no feature randomness) over
+    multiple seeds. Feature randomness should reduce variance — `sqrt` typically
+    matches or beats `all` while producing more consistent results across seeds.
+    """
+    X, y = _make_dataset(cls_type, n_samples=1200, n_features=20, n_informative=12)
+    X_tr, X_te, y_tr, y_te = _split_scale(X, y)
+
+    settings  = [("sqrt", "sqrt"), ("log2", "log2"), ("all", None)]
+    n_seeds   = 4
+    seed_grid = list(range(n_seeds))
+    palette   = sns.color_palette("muted", len(settings))
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+
+    box_data, means = [], []
+    for _, mf in settings:
+        accs = []
+        for s in seed_grid:
+            m = RandomForest(n_estimators=25, max_depth=6,
+                             max_features=mf, random_state=s).fit(X_tr, y_tr)
+            accs.append(accuracy_score(y_te, m.predict(X_te)))
+        box_data.append(accs); means.append(np.mean(accs))
+
+    bp = axes[0].boxplot(box_data, patch_artist=True,
+                         labels=[s[0] for s in settings], widths=0.55)
+    for patch, color in zip(bp["boxes"], palette):
+        patch.set_facecolor(color)
+    axes[0].set(ylabel="Test accuracy",
+                title=f"Accuracy distribution across {n_seeds} seeds")
+
+    bars = axes[1].bar([s[0] for s in settings], means, color=palette,
+                       edgecolor="white", width=0.55)
+    for bar, v in zip(bars, means):
+        axes[1].text(bar.get_x() + bar.get_width()/2, v + 0.003,
+                     f"{v:.3f}", ha="center", va="bottom", fontsize=9)
+    axes[1].set(ylabel="Mean accuracy", ylim=(min(means) - 0.05, 1.0),
+                title="Mean accuracy by max_features")
+
+    fig.suptitle(f"RF Exp 2 · max_features comparison  [{cls_type}]",
+                 fontsize=13, fontweight="bold")
+    fig.tight_layout()
+    return fig
+
+
+# ----------------------
+# RF Experiment 3 — single tree vs forest variance
+# ----------------------
+
+def exp_rf_tree_vs_forest_variance(cls_type: str) -> mplfig.Figure:
+    """
+    Bagging reduces variance. Fit a single deep tree vs. a forest under M
+    different bootstrap seeds; for each test sample, measure the variance of
+    its P(class) prediction across seeds. Tree predictions should be highly
+    variable per-sample; forest predictions should be tight.
+    """
+    X, y = _make_dataset(cls_type, n_samples=1000, noise_flip=0.05)
+    X_tr, X_te, y_tr, y_te = _split_scale(X, y)
+
+    n_repeats = 5
+    classes = np.unique(y_te)
+    K = len(classes)
+    tree_probas   = np.zeros((n_repeats, len(y_te), K))
+    forest_probas = np.zeros((n_repeats, len(y_te), K))
+
+    rng = np.random.default_rng(SEED)
+    n_tr = len(X_tr)
+    for r in range(n_repeats):
+        idx = rng.integers(0, n_tr, size=n_tr)
+        Xb, yb = X_tr[idx], y_tr[idx]
+
+        t = DecisionTree(max_depth=8).fit(Xb, yb)
+        f = RandomForest(n_estimators=25, max_depth=8,
+                         random_state=r).fit(Xb, yb)
+        # Align to global classes for each
+        tp = t.predict_proba(X_te)               # always (n, K_tree)
+        fp = f.predict_proba(X_te)
+        if fp.ndim == 1:                          # binary collapse
+            fp = np.column_stack([1 - fp, fp])
+        assert t.classes_ is not None
+        for i, c in enumerate(t.classes_):
+            j = int(np.searchsorted(classes, c))
+            tree_probas[r, :, j] = tp[:, i]
+        # forest already in (n, K)
+        forest_probas[r] = fp
+
+    # Per-sample variance of P(class 0) across the M repeats
+    tree_var   = tree_probas[:, :, 0].var(axis=0)
+    forest_var = forest_probas[:, :, 0].var(axis=0)
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+
+    axes[0].hist(tree_var,   bins=40, alpha=0.6, color="crimson",   label="Single tree")
+    axes[0].hist(forest_var, bins=40, alpha=0.6, color="steelblue", label="Forest")
+    axes[0].set(xlabel="Per-sample variance of P(class=0) across seeds",
+                ylabel="Count",
+                title="Bagging shrinks per-sample variance")
+    axes[0].legend()
+
+    axes[1].boxplot([tree_var, forest_var], labels=["Single tree", "Forest"],
+                    widths=0.5)
+    axes[1].set(ylabel="Per-sample variance",
+                title=f"Median var: tree={np.median(tree_var):.4f}  "
+                      f"forest={np.median(forest_var):.4f}")
+
+    fig.suptitle(f"RF Exp 3 · Single tree vs forest variance  [{cls_type}]",
+                 fontsize=13, fontweight="bold")
+    fig.tight_layout()
+    return fig
+
+
+# ----------------------
+# RF Experiment 4 — feature importance vs ground truth
+# ----------------------
+
+def exp_rf_feature_importance(cls_type: str) -> mplfig.Figure:
+    """
+    Generate data with known informative / redundant / noise features, fit
+    a forest, and color-code the importance bar chart by ground truth.
+    A well-behaved forest concentrates importance on the informative columns.
+    """
+    n_features   = 15
+    n_informative = 6
+    n_redundant   = 3
+    # remaining n_features - n_informative - n_redundant are pure noise
+    n_cls = N_CLASSES[cls_type]
+
+    X, y = make_classification(
+        n_samples=1500, n_features=n_features,
+        n_informative=max(n_informative, n_cls),
+        n_redundant=n_redundant,
+        n_clusters_per_class=1, n_classes=n_cls,
+        shuffle=False,                            # keep informative cols first
+        random_state=SEED,
+    )
+    # Only need a train split for fitting; test set is not used here since
+    # the experiment inspects fitted attributes, not predictions.
+    X_tr, _, y_tr, _ = _split_scale(X, y)
+
+    m = RandomForest(n_estimators=80, max_depth=6).fit(X_tr, y_tr)
+    importances = m.feature_importances_
+    assert importances is not None
+
+    # Color: informative=green, redundant=orange, noise=gray
+    colors = []
+    for i in range(n_features):
+        if i < max(n_informative, n_cls):
+            colors.append("seagreen")
+        elif i < max(n_informative, n_cls) + n_redundant:
+            colors.append("orange")
+        else:
+            colors.append("lightgray")
+
+    fig, ax = plt.subplots(figsize=(12, 5))
+    ax.bar(np.arange(n_features), importances, color=colors, edgecolor="white")
+    ax.set(xlabel="Feature index", ylabel="Importance",
+           title=(f"Forest feature importances  "
+                  f"[{n_informative} informative / {n_redundant} redundant / "
+                  f"{n_features - n_informative - n_redundant} noise]"))
+    ax.set_xticks(np.arange(n_features))
+
+    handles = [
+        mpatches.Patch(color="seagreen",  label="informative"),
+        mpatches.Patch(color="orange",    label="redundant"),
+        mpatches.Patch(color="lightgray", label="noise"),
+    ]
+    ax.legend(handles=handles)
+
+    fig.suptitle(f"RF Exp 4 · Feature importance vs ground truth  [{cls_type}]",
+                 fontsize=13, fontweight="bold")
+    fig.tight_layout()
+    return fig
+
+
+# ----------------------
+# RF Experiment 5 — scalability heatmap
+# ----------------------
+
+def exp_rf_scalability(cls_type: str) -> mplfig.Figure:
+    """
+    Fit time scales as O(n_estimators · single-tree-fit). Single-tree fit in
+    this implementation is roughly O(n · d · depth). So total: linear in
+    n_estimators, ~linear in n_samples for fixed depth.
+    """
+    n_estimators_grid = [10, 25, 50]
+    sample_grid       = [200, 500, 1000]
+    n_cls = N_CLASSES[cls_type]
+
+    fit_time_mat = np.zeros((len(sample_grid), len(n_estimators_grid)))
+    auc_mat      = np.zeros_like(fit_time_mat)
+
+    for i, n in enumerate(sample_grid):
+        for j, ne in enumerate(n_estimators_grid):
+            n_inf = max(n_cls, 6)
+            X, y  = _make_dataset(cls_type, n_samples=n, n_features=10,
+                                  n_informative=n_inf)
+            X_tr, X_te, y_tr, y_te = _split_scale(X, y)
+            r = _rf_eval(cls_type,
+                         RandomForest(n_estimators=ne, max_depth=6),
+                         X_tr, y_tr, X_te, y_te)
+            fit_time_mat[i, j] = r["fit_time"]
+            auc_mat[i, j]      = r["roc_auc"]
+
+    row_labels = [str(n)  for n  in sample_grid]
+    col_labels = [str(ne) for ne in n_estimators_grid]
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+    sns.heatmap(fit_time_mat, annot=True, fmt=".2f", cmap="YlOrRd",
+                xticklabels=col_labels, yticklabels=row_labels,
+                ax=axes[0], linewidths=0.4)
+    axes[0].set(xlabel="n_estimators", ylabel="n_samples",
+                title="Fit time (s) — linear in n_estimators")
+
+    sns.heatmap(auc_mat, annot=True, fmt=".3f", cmap="Blues",
+                xticklabels=col_labels, yticklabels=row_labels,
+                ax=axes[1], linewidths=0.4, vmin=0.5, vmax=1.0)
+    axes[1].set(xlabel="n_estimators", ylabel="n_samples", title="ROC-AUC")
+
+    fig.suptitle(f"RF Exp 5 · Scalability  [{cls_type}]",
+                 fontsize=13, fontweight="bold")
+    fig.tight_layout()
+    return fig
+
+
+# ----------------------
+# Random Forest entry point
+# ----------------------
+
+def evaluate_RandomForest(cls_type: str = "binary") -> None:
+    if cls_type not in VALID_TYPES:
+        raise ValueError(f"cls_type must be one of {VALID_TYPES}. Got {cls_type!r}.")
+    if cls_type == "all":
+        for t in VALID_TYPES[:-1]:
+            evaluate_RandomForest(cls_type=t)
+        return
+
+    print(f"Evaluating RandomForest  [type={cls_type}]  "
+          f"({N_CLASSES[cls_type]} classes)\n")
+
+    experiments = [
+        ("n_estimators convergence",       lambda: exp_rf_n_estimators(cls_type)),
+        ("max_features comparison",        lambda: exp_rf_max_features(cls_type)),
+        ("Tree vs forest variance",        lambda: exp_rf_tree_vs_forest_variance(cls_type)),
+        ("Feature importance",             lambda: exp_rf_feature_importance(cls_type)),
+        ("Scalability",                    lambda: exp_rf_scalability(cls_type)),
+    ]
+
+    for name, fn in experiments:
+        print(f"  -> {name} …")
+        fig = fn()
+
+    print("\nDone.")
+    plt.show()
+
+
+# ----------------------
+# SVM helpers
+# ----------------------
+
+def _new_svm_model(**kwargs) -> SVM:
+    return SVM(**kwargs)
+
+
+def _svm_eval(cls_type: str, model: SVM, X_tr, y_tr, X_te, y_te) -> dict:
+    """Fit-then-evaluate helper for SVM. Records fit time."""
+    t0 = perf_counter()
+    model.fit(X_tr, y_tr)
+    fit_time = perf_counter() - t0
+    proba = model.predict_proba(X_te)
+    pred  = model.predict(X_te)
+    return {"fit_time": fit_time,
+            **_compute_metrics(cls_type, y_te, pred, proba),
+            "proba": proba, "pred": pred, "model": model}
+
+
+# ----------------------
+# SVM Experiment 1 — linear vs RBF on non-linear data
+# ----------------------
+
+def exp_svm_kernel_comparison(cls_type: str) -> mplfig.Figure:
+    """
+    Two 2D non-linear datasets: moons and concentric blobs. Plot the decision
+    boundary of a linear SVM vs. an RBF SVM. Linear is helpless on either;
+    RBF captures the structure via the kernel trick.
+    """
+    from sklearn.datasets import make_moons, make_circles
+    datasets = [
+        ("moons",   make_moons  (n_samples=400, noise=0.20, random_state=SEED)),
+        ("circles", make_circles(n_samples=400, noise=0.10,
+                                  factor=0.45,        random_state=SEED)),
+    ]
+
+    fig, axes = plt.subplots(2, 2, figsize=(11, 10), sharex="row", sharey="row")
+    palette = sns.color_palette("muted", 2)
+
+    for row, (ds_name, (X, y)) in enumerate(datasets):
+        X_tr, _, y_tr, _ = _split_scale(X, y)
+        for col, kernel in enumerate(("linear", "rbf")):
+            ax = axes[row, col]
+            model = SVM(C=1.0, kernel=kernel, lr=0.01, n_iter=300).fit(X_tr, y_tr)
+            acc = model.score(X_tr, y_tr)
+
+            xs = np.linspace(X_tr[:, 0].min() - 0.5, X_tr[:, 0].max() + 0.5, 150)
+            ys = np.linspace(X_tr[:, 1].min() - 0.5, X_tr[:, 1].max() + 0.5, 150)
+            XX, YY = np.meshgrid(xs, ys)
+            grid   = np.column_stack([XX.ravel(), YY.ravel()])
+            ZZ = model.decision_function(grid).reshape(XX.shape)
+
+            ax.contourf(XX, YY, ZZ, levels=[-1e9, 0, 1e9],
+                        colors=[palette[0], palette[1]], alpha=0.15)
+            ax.contour(XX, YY, ZZ, levels=[-1, 0, 1], colors="black",
+                       linestyles=[":", "-", ":"], linewidths=[1, 1.5, 1])
+            for cls, color in zip([0, 1], palette):
+                mask = y_tr == cls
+                ax.scatter(X_tr[mask, 0], X_tr[mask, 1], color=color, s=14,
+                           edgecolor="white", linewidth=0.4)
+            ax.set(title=f"{ds_name} · {kernel}  (train acc={acc:.3f})",
+                   xticks=[], yticks=[])
+
+    fig.suptitle("SVM Exp 1 · Linear vs RBF on non-linear data",
+                 fontsize=13, fontweight="bold")
+    fig.tight_layout()
+    return fig
+
+
+# ----------------------
+# SVM Experiment 2 — C sweep (margin-vs-misclassification tradeoff)
+# ----------------------
+
+def exp_svm_C_sweep(cls_type: str) -> mplfig.Figure:
+    """
+    Sweep C. Low C → wide margin, accepts misclassifications, few SVs.
+    High C → narrow margin, fits training data harder, many SVs.
+    Track test accuracy + number of support vectors (RBF only).
+    """
+    X, y = _make_dataset(cls_type, n_samples=600, noise_flip=0.05)
+    X_tr, X_te, y_tr, y_te = _split_scale(X, y)
+
+    C_grid = np.logspace(-2, 2, 9)
+    test_accs_lin,  test_accs_rbf  = [], []
+    n_svs_rbf = []
+
+    for C in C_grid:
+        m_lin = SVM(C=C, kernel="linear", lr=0.01, n_iter=300).fit(X_tr, y_tr)
+        m_rbf = SVM(C=C, kernel="rbf",   n_iter=300).fit(X_tr, y_tr)
+        test_accs_lin.append(m_lin.score(X_te, y_te))
+        test_accs_rbf.append(m_rbf.score(X_te, y_te))
+        # Count SVs from the binary base if OvR; else from the binary fit
+        if m_rbf._ovr is not None:
+            n_svs_rbf.append(int(np.mean(
+                [len(e.support_vectors_)  # type: ignore[attr-defined]
+                 for e in m_rbf._ovr.estimators_]
+            )))
+        else:
+            assert m_rbf.support_vectors_ is not None
+            n_svs_rbf.append(len(m_rbf.support_vectors_))
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+
+    axes[0].semilogx(C_grid, test_accs_lin, marker="o", label="linear")
+    axes[0].semilogx(C_grid, test_accs_rbf, marker="s", label="rbf")
+    axes[0].set(xlabel="C", ylabel="Test accuracy",
+                title="Bias-variance trade-off in C")
+    axes[0].legend()
+
+    axes[1].semilogx(C_grid, n_svs_rbf, marker="o", color="darkorange")
+    axes[1].set(xlabel="C", ylabel="# support vectors (RBF, avg per OvR fit)",
+                title="High C ⇒ fewer SVs ⇒ tighter fit")
+
+    fig.suptitle(f"SVM Exp 2 · C sweep  [{cls_type}]",
+                 fontsize=13, fontweight="bold")
+    fig.tight_layout()
+    return fig
+
+
+# ----------------------
+# SVM Experiment 3 — gamma sweep (RBF only, 2D viz)
+# ----------------------
+
+def exp_svm_gamma_sweep(cls_type: str) -> mplfig.Figure:
+    """
+    γ controls the RBF bandwidth. Small γ → smooth, almost-linear boundary
+    (high bias). Large γ → spiky boundary that wraps individual training
+    points (high variance). Visualize on 2D moons.
+    """
+    from sklearn.datasets import make_moons
+    X, y = make_moons(n_samples=400, noise=0.20, random_state=SEED)
+    X_tr, _, y_tr, _ = _split_scale(X, y)
+
+    gammas = [0.01, 0.1, 1.0, 10.0]
+    fig, axes = plt.subplots(1, len(gammas), figsize=(4.2 * len(gammas), 4.5),
+                             sharex=True, sharey=True)
+    palette = sns.color_palette("muted", 2)
+
+    xs = np.linspace(X_tr[:, 0].min() - 0.5, X_tr[:, 0].max() + 0.5, 200)
+    ys = np.linspace(X_tr[:, 1].min() - 0.5, X_tr[:, 1].max() + 0.5, 200)
+    XX, YY = np.meshgrid(xs, ys)
+    grid   = np.column_stack([XX.ravel(), YY.ravel()])
+
+    for ax, g in zip(axes, gammas):
+        m = SVM(C=1.0, kernel="rbf", gamma=g, n_iter=300).fit(X_tr, y_tr)
+        ZZ = m.decision_function(grid).reshape(XX.shape)
+        ax.contourf(XX, YY, ZZ, levels=[-1e9, 0, 1e9],
+                    colors=[palette[0], palette[1]], alpha=0.15)
+        ax.contour(XX, YY, ZZ, levels=[0], colors="black", linewidths=1.5)
+        for cls, color in zip([0, 1], palette):
+            mask = y_tr == cls
+            ax.scatter(X_tr[mask, 0], X_tr[mask, 1], color=color, s=14,
+                       edgecolor="white", linewidth=0.4)
+        ax.set(title=f"γ={g}  (acc={m.score(X_tr, y_tr):.3f})",
+               xticks=[], yticks=[])
+
+    fig.suptitle("SVM Exp 3 · γ sweep — RBF bandwidth (moons)",
+                 fontsize=13, fontweight="bold")
+    fig.tight_layout()
+    return fig
+
+
+# ----------------------
+# SVM Experiment 4 — support-vector visualization
+# ----------------------
+
+def exp_svm_support_vectors(cls_type: str) -> mplfig.Figure:
+    """
+    On a 2D scatter, highlight the points the model selected as support
+    vectors. They cluster near the decision boundary — that's the geometric
+    intuition of "the data points that 'support' the margin".
+    """
+    from sklearn.datasets import make_blobs
+    X, y = make_blobs(n_samples=300, centers=2, cluster_std=1.4,
+                      random_state=SEED)
+    X_tr, _, y_tr, _ = _split_scale(X, y)
+
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5.5))
+    palette = sns.color_palette("muted", 2)
+
+    for ax, kernel in zip(axes, ("linear", "rbf")):
+        m = SVM(C=1.0, kernel=kernel, lr=0.01, n_iter=300).fit(X_tr, y_tr)
+
+        xs = np.linspace(X_tr[:, 0].min() - 0.5, X_tr[:, 0].max() + 0.5, 200)
+        ys = np.linspace(X_tr[:, 1].min() - 0.5, X_tr[:, 1].max() + 0.5, 200)
+        XX, YY = np.meshgrid(xs, ys)
+        grid   = np.column_stack([XX.ravel(), YY.ravel()])
+        ZZ     = m.decision_function(grid).reshape(XX.shape)
+
+        ax.contourf(XX, YY, ZZ, levels=[-1e9, 0, 1e9],
+                    colors=[palette[0], palette[1]], alpha=0.15)
+        ax.contour(XX, YY, ZZ, levels=[-1, 0, 1], colors="black",
+                   linestyles=[":", "-", ":"], linewidths=[1, 1.5, 1])
+        for cls, color in zip([0, 1], palette):
+            mask = y_tr == cls
+            ax.scatter(X_tr[mask, 0], X_tr[mask, 1], color=color, s=20,
+                       edgecolor="white", linewidth=0.4, alpha=0.6)
+
+        if kernel == "rbf" and m.support_vectors_ is not None and len(m.support_vectors_) > 0:
+            ax.scatter(m.support_vectors_[:, 0], m.support_vectors_[:, 1],
+                       s=110, facecolors="none", edgecolors="black",
+                       linewidth=1.3, label=f"{len(m.support_vectors_)} SVs")
+            ax.legend(loc="best")
+
+        ax.set(title=f"{kernel} kernel", xticks=[], yticks=[])
+
+    fig.suptitle("SVM Exp 4 · Support vectors cluster near the margin",
+                 fontsize=13, fontweight="bold")
+    fig.tight_layout()
+    return fig
+
+
+# ----------------------
+# SVM Experiment 5 — linear SVM vs LogReg robustness to label noise
+# ----------------------
+
+def exp_svm_vs_logreg(cls_type: str) -> mplfig.Figure:
+    """
+    Linear SVM and LogReg both produce linear decision boundaries but optimize
+    different losses (hinge vs. cross-entropy). Sweep `flip_y` to add label
+    noise and compare accuracy + fit time. Hinge is supposed to be more
+    robust to mislabeled points far from the boundary.
+    """
+    noise_grid = [0.0, 0.05, 0.10, 0.15, 0.20, 0.30]
+    svm_accs, lr_accs, svm_times, lr_times = [], [], [], []
+
+    for nf in noise_grid:
+        X, y = _make_dataset(cls_type, n_samples=800, noise_flip=nf)
+        X_tr, X_te, y_tr, y_te = _split_scale(X, y)
+
+        t0 = perf_counter()
+        svm = SVM(C=1.0, kernel="linear", lr=0.01, n_iter=300).fit(X_tr, y_tr)
+        svm_times.append(perf_counter() - t0)
+
+        t0 = perf_counter()
+        lr  = LogisticRegression(lr=0.05, n_iter=500, type=cls_type).fit(X_tr, y_tr)
+        lr_times.append(perf_counter() - t0)
+
+        svm_accs.append(accuracy_score(y_te, svm.predict(X_te)))
+        lr_accs.append(accuracy_score(y_te, lr.predict(X_te)))
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+
+    axes[0].plot(np.array(noise_grid) * 100, svm_accs, marker="o", label="Linear SVM (hinge)")
+    axes[0].plot(np.array(noise_grid) * 100, lr_accs,  marker="s", label="LogReg (cross-entropy)")
+    axes[0].set(xlabel="Label noise (%)", ylabel="Test accuracy",
+                title="Robustness comparison: SVM vs LogReg")
+    axes[0].legend()
+
+    axes[1].plot(np.array(noise_grid) * 100, svm_times, marker="o", label="Linear SVM")
+    axes[1].plot(np.array(noise_grid) * 100, lr_times,  marker="s", label="LogReg")
+    axes[1].set(xlabel="Label noise (%)", ylabel="Fit time (s)",
+                title="Fit time comparison")
+    axes[1].legend()
+
+    fig.suptitle(f"SVM Exp 5 · Linear SVM vs LogReg  [{cls_type}]",
+                 fontsize=13, fontweight="bold")
+    fig.tight_layout()
+    return fig
+
+
+# ----------------------
+# SVM entry point
+# ----------------------
+
+def evaluate_SVM(cls_type: str = "binary") -> None:
+    if cls_type not in VALID_TYPES:
+        raise ValueError(f"cls_type must be one of {VALID_TYPES}. Got {cls_type!r}.")
+    if cls_type == "all":
+        for t in VALID_TYPES[:-1]:
+            evaluate_SVM(cls_type=t)
+        return
+
+    print(f"Evaluating SVM  [type={cls_type}]  ({N_CLASSES[cls_type]} classes)\n")
+
+    experiments = [
+        ("Linear vs RBF (non-linear data)",  lambda: exp_svm_kernel_comparison(cls_type)),
+        ("C sweep",                          lambda: exp_svm_C_sweep(cls_type)),
+        ("gamma sweep (RBF)",                lambda: exp_svm_gamma_sweep(cls_type)),
+        ("Support vector visualization",     lambda: exp_svm_support_vectors(cls_type)),
+        ("Linear SVM vs LogReg",             lambda: exp_svm_vs_logreg(cls_type)),
+    ]
+
+    for name, fn in experiments:
+        print(f"  -> {name} …")
+        fig = fn()
+
+    print("\nDone.")
+    plt.show()
+
+
+# ----------------------
+# Decision Tree helpers
+# ----------------------
+
+def _count_nodes(node: Node | None) -> tuple[int, int]:
+    """Return (total_nodes, leaf_count) under `node`."""
+    if node is None:
+        return 0, 0
+    if node.is_leaf:
+        return 1, 1
+    n_l, l_l = _count_nodes(node.left)
+    n_r, l_r = _count_nodes(node.right)
+    return 1 + n_l + n_r, l_l + l_r
+
+
+def _tree_depth(node: Node | None) -> int:
+    """Actual depth of fitted tree (root with no children → 0)."""
+    if node is None or node.is_leaf:
+        return 0
+    return 1 + max(_tree_depth(node.left), _tree_depth(node.right))
+
+
+def _dt_eval(cls_type: str, model: DecisionTree, X_tr, y_tr, X_te, y_te) -> dict:
+    """Fit-then-evaluate helper for DecisionTree. Records fit time.
+
+    DecisionTree.predict_proba always returns shape (n, K). For binary,
+    _compute_metrics expects a 1D positive-class score (matching the other
+    classifiers in this module), so we collapse to column 1.
+    """
+    t0 = perf_counter()
+    model.fit(X_tr, y_tr)
+    fit_time = perf_counter() - t0
+    proba_2d = model.predict_proba(X_te)
+    pred     = model.predict(X_te)
+    proba_metric = proba_2d[:, 1] if cls_type == "binary" else proba_2d
+    return {"fit_time": fit_time,
+            **_compute_metrics(cls_type, y_te, pred, proba_metric),
+            "proba": proba_2d, "pred": pred, "tree": model}
+
+
+# ----------------------
+# DT Experiment 1 – depth sweep (bias-variance)
+# ----------------------
+
+def exp_dt_depth_sweep(cls_type: str) -> mplfig.Figure:
+    """
+    The canonical bias-variance plot for trees.
+    depth=1  → one stump → high bias.
+    depth=20 → leaves of size 1 → memorizes training set → high variance.
+    Tree size grows roughly exponentially with depth on noisy data.
+    """
+    X, y = _make_dataset(cls_type, n_samples=1500, noise_flip=0.05)
+    X_tr, X_te, y_tr, y_te = _split_scale(X, y)
+
+    depth_grid = list(range(1, 21))
+    train_accs, test_accs, test_f1s, n_nodes_list = [], [], [], []
+
+    for d in depth_grid:
+        m = DecisionTree(max_depth=d).fit(X_tr, y_tr)
+        train_accs.append(accuracy_score(y_tr, m.predict(X_tr)))
+        pred = m.predict(X_te)
+        proba_2d = m.predict_proba(X_te)
+        proba_metric = proba_2d[:, 1] if cls_type == "binary" else proba_2d
+        mts = _compute_metrics(cls_type, y_te, pred, proba_metric)
+        test_accs.append(mts["accuracy"])
+        test_f1s.append(mts["f1"])
+        n_total, _ = _count_nodes(m.root_)
+        n_nodes_list.append(n_total)
+
+    best_d = depth_grid[int(np.argmax(test_f1s))]
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+
+    ax = axes[0]
+    ax.plot(depth_grid, train_accs, ls="--", marker=".", label="Train accuracy")
+    ax.plot(depth_grid, test_accs,  marker=".",         label="Test accuracy")
+    ax.plot(depth_grid, test_f1s,   marker=".",         label="Test F1 (macro)")
+    ax.axvline(best_d, color="red", ls=":", alpha=0.7, label=f"Best depth={best_d}")
+    ax.fill_between(depth_grid,
+                    [tr - te for tr, te in zip(train_accs, test_accs)],
+                    alpha=0.08, color="red", label="Overfit gap")
+    ax.set(xlabel="max_depth", ylabel="Score",
+           title="Bias-variance: train vs. test as tree grows")
+    ax.legend(fontsize=9)
+
+    ax = axes[1]
+    ax.plot(depth_grid, n_nodes_list, marker="o", color="darkorange")
+    ax.set(xlabel="max_depth", ylabel="Total nodes",
+           title="Tree size grows roughly exponentially with depth")
+    ax.set_yscale("log")
+
+    fig.suptitle(f"DT Exp 1 · Depth sweep  [{cls_type}]", fontsize=13, fontweight="bold")
+    fig.tight_layout()
+    return fig
+
+
+# ----------------------
+# DT Experiment 2 – entropy vs gini
+# ----------------------
+
+def exp_dt_criterion_comparison(cls_type: str, max_depth: int = 8) -> mplfig.Figure:
+    """
+    Entropy and gini share the same shape (concave on [0,1], zero at pure leaves,
+    max at uniform). They tend to pick nearly identical splits in practice.
+    Gini avoids `log` so it's usually a touch faster.
+    """
+    X, y = _make_dataset(cls_type, n_samples=2000)
+    X_tr, X_te, y_tr, y_te = _split_scale(X, y)
+
+    criteria    = ["entropy", "gini"]
+    metric_cols = ["accuracy", "f1", "roc_auc", "log_loss"]
+    palette     = sns.color_palette("muted", len(criteria))
+    results: dict[str, dict] = {}
+
+    for c in criteria:
+        m = DecisionTree(max_depth=max_depth, criterion=c)  # type: ignore[arg-type]
+        results[c] = _dt_eval(cls_type, m, X_tr, y_tr, X_te, y_te)
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+
+    # Grouped metric bar chart
+    ax    = axes[0]
+    x     = np.arange(len(metric_cols))
+    bar_w = 0.35
+    for i, c in enumerate(criteria):
+        vals = [results[c][mc] for mc in metric_cols]
+        bars = ax.bar(x + i * bar_w, vals, width=bar_w, label=c, color=palette[i])
+        for bar, v in zip(bars, vals):
+            ax.text(bar.get_x() + bar.get_width() / 2, v + 0.01,
+                    f"{v:.3f}", ha="center", va="bottom", fontsize=7)
+    ax.set_xticks(x + bar_w / 2)
+    ax.set_xticklabels(metric_cols)
+    ax.set(ylabel="Score", title=f"Metric comparison (max_depth={max_depth})")
+    ax.legend()
+
+    # Fit time
+    ax    = axes[1]
+    times = [results[c]["fit_time"] for c in criteria]
+    bars  = ax.bar(criteria, times, color=palette, edgecolor="white", width=0.5)
+    for bar, t in zip(bars, times):
+        ax.text(bar.get_x() + bar.get_width() / 2, t + max(times) * 0.01,
+                f"{t*1000:.1f} ms", ha="center", va="bottom", fontsize=9)
+    ax.set(ylabel="Fit time (s)", title="Fit time — entropy pays for log calls")
+
+    fig.suptitle(f"DT Exp 2 · Entropy vs Gini  [{cls_type}]",
+                 fontsize=13, fontweight="bold")
+    fig.tight_layout()
+    return fig
+
+
+# ----------------------
+# DT Experiment 3 – regularization via min_samples_leaf
+# ----------------------
+
+def exp_dt_regularization(cls_type: str, max_depth: int = 20) -> mplfig.Figure:
+    """
+    `min_samples_leaf` forces each leaf to contain at least N samples.
+    Larger N → fewer, larger leaves → simpler boundary → closes train/test gap.
+    Run with elevated label noise so the regularization signal is clearer.
+    """
+    X, y = _make_dataset(cls_type, n_samples=1500, noise_flip=0.10)
+    X_tr, X_te, y_tr, y_te = _split_scale(X, y)
+
+    leaf_grid = [1, 2, 5, 10, 20, 50, 100, 200]
+    train_accs, test_accs, n_leaves_list, actual_depths = [], [], [], []
+
+    for n_leaf in leaf_grid:
+        m = DecisionTree(max_depth=max_depth, min_samples_leaf=n_leaf).fit(X_tr, y_tr)
+        train_accs.append(accuracy_score(y_tr, m.predict(X_tr)))
+        test_accs.append(accuracy_score(y_te, m.predict(X_te)))
+        _, n_leaves = _count_nodes(m.root_)
+        n_leaves_list.append(n_leaves)
+        actual_depths.append(_tree_depth(m.root_))
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+
+    ax = axes[0]
+    ax.semilogx(leaf_grid, train_accs, ls="--", marker="o", label="Train accuracy")
+    ax.semilogx(leaf_grid, test_accs,  marker="s",          label="Test accuracy")
+    ax.set(xlabel="min_samples_leaf", ylabel="Accuracy",
+           title="Leaf-size regularization closes the train/test gap")
+    ax.legend()
+
+    ax  = axes[1]
+    ax.semilogx(leaf_grid, n_leaves_list, marker="o", color="purple",
+                label="# leaves")
+    ax2 = ax.twinx()
+    ax2.semilogx(leaf_grid, actual_depths, marker="s", ls="--",
+                 color="darkorange", label="Actual depth")
+    ax.set(xlabel="min_samples_leaf", ylabel="Number of leaves",
+           title="Tree complexity vs. leaf-size constraint")
+    ax2.set_ylabel("Actual tree depth")
+    ax.legend(loc="upper right");  ax2.legend(loc="center right")
+
+    fig.suptitle(f"DT Exp 3 · Regularization  [{cls_type}]",
+                 fontsize=13, fontweight="bold")
+    fig.tight_layout()
+    return fig
+
+
+# ----------------------
+# DT Experiment 4 – confusion + calibration (trees are overconfident)
+# ----------------------
+
+def exp_dt_confusion_calibration(cls_type: str, max_depth: int = 8) -> mplfig.Figure:
+    """
+    Tree probabilities are leaf class frequencies. Deep trees produce pure leaves
+    → probas pile up near 0/1 regardless of true confidence. The reliability
+    diagram + max-confidence histogram make this visible.
+    """
+    X, y = _make_dataset(cls_type, n_samples=3000)
+    X_tr, X_te, y_tr, y_te = _split_scale(X, y)
+    r       = _dt_eval(cls_type, DecisionTree(max_depth=max_depth), X_tr, y_tr, X_te, y_te)
+    proba, pred = r["proba"], r["pred"]
+    classes = np.unique(y_te)
+    K       = len(classes)
+    palette = sns.color_palette("muted", K)
+
+    fig, axes = plt.subplots(1, 3, figsize=(17, 5))
+
+    # Confusion matrix
+    ax = axes[0]
+    cm      = confusion_matrix(y_te, pred, labels=classes)
+    cm_norm = cm.astype(float) / cm.sum(axis=1, keepdims=True)
+    sns.heatmap(cm_norm, annot=True, fmt=".2%", cmap="Blues",
+                xticklabels=[str(c) for c in classes],
+                yticklabels=[str(c) for c in classes],
+                ax=ax, linewidths=0.5)
+    for (i, j), raw in np.ndenumerate(cm):
+        ax.text(j + 0.5, i + 0.72, f"n={raw}", ha="center", va="center",
+                fontsize=7, color="gray")
+    ax.set(title=f"Confusion matrix  (max_depth={max_depth})",
+           xlabel="Predicted", ylabel="True")
+
+    # Reliability diagram
+    ax     = axes[1]
+    n_bins = 10
+    bins   = np.linspace(0, 1, n_bins + 1)
+    ax.plot([0, 1], [0, 1], "k--", alpha=0.5, label="Perfect")
+
+    if cls_type == "binary":
+        p1d = proba if proba.ndim == 1 else proba[:, 1]
+        bin_ids = np.digitize(p1d, bins[1:-1])
+        mean_pred = [p1d[bin_ids == b].mean()  if (bin_ids == b).any() else np.nan for b in range(n_bins)]
+        frac_pos  = [y_te[bin_ids == b].mean() if (bin_ids == b).any() else np.nan for b in range(n_bins)]
+        ax.plot(mean_pred, frac_pos, marker="o", lw=2, label="Tree")
+    else:
+        Y_bin = np.asarray(label_binarize(y_te, classes=classes))
+        for k in range(K):
+            pk       = proba[:, k]
+            bin_ids  = np.digitize(pk, bins[1:-1])
+            mean_pred = [pk[bin_ids == b].mean()       if (bin_ids == b).any() else np.nan for b in range(n_bins)]
+            frac_pos  = [Y_bin[bin_ids == b, k].mean() if (bin_ids == b).any() else np.nan for b in range(n_bins)]
+            ax.plot(mean_pred, frac_pos, marker="o", lw=1.5,
+                    color=palette[k], label=f"class {classes[k]}")
+
+    ax.set(xlabel="Mean predicted probability", ylabel="Fraction of positives",
+           title="Reliability — trees pile probas near 0 and 1",
+           xlim=(0, 1), ylim=(0, 1))
+    ax.legend(fontsize=8)
+
+    # Max-confidence histogram (correct vs. incorrect)
+    ax       = axes[2]
+    if proba.ndim == 1:
+        max_conf = np.maximum(proba, 1 - proba)
+    else:
+        max_conf = proba.max(axis=1)
+    correct  = (pred == y_te)
+    ax.hist(max_conf[correct],  bins=20, alpha=0.65, color="steelblue", label="Correct")
+    ax.hist(max_conf[~correct], bins=20, alpha=0.65, color="crimson",   label="Incorrect")
+    ax.set(xlabel="Max predicted probability", ylabel="Count",
+           title="Confidence distribution")
+    ax.legend()
+
+    fig.suptitle(f"DT Exp 4 · Confusion & calibration  [{cls_type}]",
+                 fontsize=13, fontweight="bold")
+    fig.tight_layout()
+    return fig
+
+
+# ----------------------
+# DT Experiment 5 – scalability (fit time heatmap)
+# ----------------------
+
+def exp_dt_scalability(cls_type: str, max_depth: int = 8) -> mplfig.Figure:
+    """
+    This implementation's fit cost is roughly O(n · d · depth) — every node
+    re-scans all features and all unique thresholds. Production trees (sklearn)
+    use presorting / histograms to amortize this to O(n · d · log n).
+    """
+    sample_grid  = [200, 500, 1000, 3000, 5000]
+    feature_grid = [5, 10, 20, 50, 100]
+    n_cls = N_CLASSES[cls_type]
+
+    fit_time_mat = np.zeros((len(sample_grid), len(feature_grid)))
+    auc_mat      = np.zeros_like(fit_time_mat)
+
+    for i, n in enumerate(sample_grid):
+        for j, d in enumerate(feature_grid):
+            n_inf = max(n_cls, min(d, d // 2))
+            X, y  = _make_dataset(cls_type, n_samples=n, n_features=d,
+                                  n_informative=n_inf)
+            X_tr, X_te, y_tr, y_te = _split_scale(X, y)
+            r = _dt_eval(cls_type, DecisionTree(max_depth=max_depth),
+                         X_tr, y_tr, X_te, y_te)
+            fit_time_mat[i, j] = r["fit_time"]
+            auc_mat[i, j]      = r["roc_auc"]
+
+    row_labels = [str(n) for n in sample_grid]
+    col_labels = [str(d) for d in feature_grid]
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+    sns.heatmap(fit_time_mat, annot=True, fmt=".3f", cmap="YlOrRd",
+                xticklabels=col_labels, yticklabels=row_labels,
+                ax=axes[0], linewidths=0.4)
+    axes[0].set(xlabel="n_features", ylabel="n_samples",
+                title=f"Fit time (s)  — O(n·d·depth)  [max_depth={max_depth}]")
+
+    sns.heatmap(auc_mat, annot=True, fmt=".3f", cmap="Blues",
+                xticklabels=col_labels, yticklabels=row_labels,
+                ax=axes[1], linewidths=0.4, vmin=0.5, vmax=1.0)
+    axes[1].set(xlabel="n_features", ylabel="n_samples", title="ROC-AUC")
+
+    fig.suptitle(f"DT Exp 5 · Scalability  [{cls_type}]",
+                 fontsize=13, fontweight="bold")
+    fig.tight_layout()
+    return fig
+
+
+# ----------------------
+# Decision Tree entry point
+# ----------------------
+
+def evaluate_DecisionTree(cls_type: str = "binary") -> None:
+    if cls_type not in VALID_TYPES:
+        raise ValueError(f"cls_type must be one of {VALID_TYPES}. Got {cls_type!r}.")
+    if cls_type == "all":
+        for t in VALID_TYPES[:-1]:
+            evaluate_DecisionTree(cls_type=t)
+        return
+
+    print(f"Evaluating DecisionTree  [type={cls_type}]  "
+          f"({N_CLASSES[cls_type]} classes)\n")
+
+    experiments = [
+        ("Depth sweep (bias-variance)", lambda: exp_dt_depth_sweep(cls_type)),
+        ("Entropy vs Gini",             lambda: exp_dt_criterion_comparison(cls_type)),
+        ("Regularization",              lambda: exp_dt_regularization(cls_type)),
+        ("Confusion & calibration",     lambda: exp_dt_confusion_calibration(cls_type)),
+        ("Scalability",                 lambda: exp_dt_scalability(cls_type)),
+    ]
+
+    for name, fn in experiments:
+        print(f"  -> {name} …")
+        fig = fn()
+
+    print("\nDone.")
+    plt.show()
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Evaluate classification algorithms.",
@@ -1188,7 +2817,9 @@ def main():
     )
     parser.add_argument(
         "--algo", default="logistic_regression",
-        choices=["logistic_regression", "knn", "naive_bayes"],
+        choices=["logistic_regression", "knn", "naive_bayes",
+                 "decision_tree", "perceptron", "discriminant_analysis",
+                 "random_forest", "svm"],
         help="Algorithm to evaluate.",
     )
     parser.add_argument(
@@ -1201,6 +2832,11 @@ def main():
         choices=list(VALID_NB_VARIANTS),
         help="Naive Bayes variant (only used when --algo=naive_bayes).",
     )
+    parser.add_argument(
+        "--da_variant", default="lda",
+        choices=list(VALID_DA_VARIANTS),
+        help="Discriminant Analysis variant (only used when --algo=discriminant_analysis).",
+    )
     args = parser.parse_args()
 
     if args.algo == "logistic_regression":
@@ -1209,6 +2845,16 @@ def main():
         evaluate_KNN(cls_type=args.cls_type)
     elif args.algo == "naive_bayes":
         evaluate_NaiveBayes(nb_variant=args.nb_variant, cls_type=args.cls_type)
+    elif args.algo == "decision_tree":
+        evaluate_DecisionTree(cls_type=args.cls_type)
+    elif args.algo == "perceptron":
+        evaluate_Perceptron(cls_type=args.cls_type)
+    elif args.algo == "discriminant_analysis":
+        evaluate_DiscriminantAnalysis(da_variant=args.da_variant, cls_type=args.cls_type)
+    elif args.algo == "random_forest":
+        evaluate_RandomForest(cls_type=args.cls_type)
+    elif args.algo == "svm":
+        evaluate_SVM(cls_type=args.cls_type)
     else:
         raise ValueError(f"Unsupported algorithm {args.algo!r}.")
 
