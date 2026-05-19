@@ -4,6 +4,7 @@ from .naive_bayes import MultinomialNB, BernoulliNB
 from .perceptron import Perceptron
 from .discriminant_analysis import LDA, QDA
 from .random_forest import RandomForest
+from .svm import SVM
 
 
 __all__= [
@@ -13,4 +14,5 @@ __all__= [
     "LDA",
     "QDA",
     "RandomForest",
+    "SVM",
 ]

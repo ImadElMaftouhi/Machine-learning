@@ -23,6 +23,7 @@ from decision_tree import DecisionTree, Node
 from perceptron import Perceptron
 from discriminant_analysis import LDA, QDA
 from random_forest import RandomForest
+from svm import SVM
 
 sns.set_theme(style="whitegrid", palette="muted")
 SEED = 42
@@ -2158,6 +2159,298 @@ def evaluate_RandomForest(cls_type: str = "binary") -> None:
 
 
 # ----------------------
+# SVM helpers
+# ----------------------
+
+def _new_svm_model(**kwargs) -> SVM:
+    return SVM(**kwargs)
+
+
+def _svm_eval(cls_type: str, model: SVM, X_tr, y_tr, X_te, y_te) -> dict:
+    """Fit-then-evaluate helper for SVM. Records fit time."""
+    t0 = perf_counter()
+    model.fit(X_tr, y_tr)
+    fit_time = perf_counter() - t0
+    proba = model.predict_proba(X_te)
+    pred  = model.predict(X_te)
+    return {"fit_time": fit_time,
+            **_compute_metrics(cls_type, y_te, pred, proba),
+            "proba": proba, "pred": pred, "model": model}
+
+
+# ----------------------
+# SVM Experiment 1 — linear vs RBF on non-linear data
+# ----------------------
+
+def exp_svm_kernel_comparison(cls_type: str) -> mplfig.Figure:
+    """
+    Two 2D non-linear datasets: moons and concentric blobs. Plot the decision
+    boundary of a linear SVM vs. an RBF SVM. Linear is helpless on either;
+    RBF captures the structure via the kernel trick.
+    """
+    from sklearn.datasets import make_moons, make_circles
+    datasets = [
+        ("moons",   make_moons  (n_samples=400, noise=0.20, random_state=SEED)),
+        ("circles", make_circles(n_samples=400, noise=0.10,
+                                  factor=0.45,        random_state=SEED)),
+    ]
+
+    fig, axes = plt.subplots(2, 2, figsize=(11, 10), sharex="row", sharey="row")
+    palette = sns.color_palette("muted", 2)
+
+    for row, (ds_name, (X, y)) in enumerate(datasets):
+        X_tr, _, y_tr, _ = _split_scale(X, y)
+        for col, kernel in enumerate(("linear", "rbf")):
+            ax = axes[row, col]
+            model = SVM(C=1.0, kernel=kernel, lr=0.01, n_iter=300).fit(X_tr, y_tr)
+            acc = model.score(X_tr, y_tr)
+
+            xs = np.linspace(X_tr[:, 0].min() - 0.5, X_tr[:, 0].max() + 0.5, 150)
+            ys = np.linspace(X_tr[:, 1].min() - 0.5, X_tr[:, 1].max() + 0.5, 150)
+            XX, YY = np.meshgrid(xs, ys)
+            grid   = np.column_stack([XX.ravel(), YY.ravel()])
+            ZZ = model.decision_function(grid).reshape(XX.shape)
+
+            ax.contourf(XX, YY, ZZ, levels=[-1e9, 0, 1e9],
+                        colors=[palette[0], palette[1]], alpha=0.15)
+            ax.contour(XX, YY, ZZ, levels=[-1, 0, 1], colors="black",
+                       linestyles=[":", "-", ":"], linewidths=[1, 1.5, 1])
+            for cls, color in zip([0, 1], palette):
+                mask = y_tr == cls
+                ax.scatter(X_tr[mask, 0], X_tr[mask, 1], color=color, s=14,
+                           edgecolor="white", linewidth=0.4)
+            ax.set(title=f"{ds_name} · {kernel}  (train acc={acc:.3f})",
+                   xticks=[], yticks=[])
+
+    fig.suptitle("SVM Exp 1 · Linear vs RBF on non-linear data",
+                 fontsize=13, fontweight="bold")
+    fig.tight_layout()
+    return fig
+
+
+# ----------------------
+# SVM Experiment 2 — C sweep (margin-vs-misclassification tradeoff)
+# ----------------------
+
+def exp_svm_C_sweep(cls_type: str) -> mplfig.Figure:
+    """
+    Sweep C. Low C → wide margin, accepts misclassifications, few SVs.
+    High C → narrow margin, fits training data harder, many SVs.
+    Track test accuracy + number of support vectors (RBF only).
+    """
+    X, y = _make_dataset(cls_type, n_samples=600, noise_flip=0.05)
+    X_tr, X_te, y_tr, y_te = _split_scale(X, y)
+
+    C_grid = np.logspace(-2, 2, 9)
+    test_accs_lin,  test_accs_rbf  = [], []
+    n_svs_rbf = []
+
+    for C in C_grid:
+        m_lin = SVM(C=C, kernel="linear", lr=0.01, n_iter=300).fit(X_tr, y_tr)
+        m_rbf = SVM(C=C, kernel="rbf",   n_iter=300).fit(X_tr, y_tr)
+        test_accs_lin.append(m_lin.score(X_te, y_te))
+        test_accs_rbf.append(m_rbf.score(X_te, y_te))
+        # Count SVs from the binary base if OvR; else from the binary fit
+        if m_rbf._ovr is not None:
+            n_svs_rbf.append(int(np.mean(
+                [len(e.support_vectors_)  # type: ignore[attr-defined]
+                 for e in m_rbf._ovr.estimators_]
+            )))
+        else:
+            assert m_rbf.support_vectors_ is not None
+            n_svs_rbf.append(len(m_rbf.support_vectors_))
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+
+    axes[0].semilogx(C_grid, test_accs_lin, marker="o", label="linear")
+    axes[0].semilogx(C_grid, test_accs_rbf, marker="s", label="rbf")
+    axes[0].set(xlabel="C", ylabel="Test accuracy",
+                title="Bias-variance trade-off in C")
+    axes[0].legend()
+
+    axes[1].semilogx(C_grid, n_svs_rbf, marker="o", color="darkorange")
+    axes[1].set(xlabel="C", ylabel="# support vectors (RBF, avg per OvR fit)",
+                title="High C ⇒ fewer SVs ⇒ tighter fit")
+
+    fig.suptitle(f"SVM Exp 2 · C sweep  [{cls_type}]",
+                 fontsize=13, fontweight="bold")
+    fig.tight_layout()
+    return fig
+
+
+# ----------------------
+# SVM Experiment 3 — gamma sweep (RBF only, 2D viz)
+# ----------------------
+
+def exp_svm_gamma_sweep(cls_type: str) -> mplfig.Figure:
+    """
+    γ controls the RBF bandwidth. Small γ → smooth, almost-linear boundary
+    (high bias). Large γ → spiky boundary that wraps individual training
+    points (high variance). Visualize on 2D moons.
+    """
+    from sklearn.datasets import make_moons
+    X, y = make_moons(n_samples=400, noise=0.20, random_state=SEED)
+    X_tr, _, y_tr, _ = _split_scale(X, y)
+
+    gammas = [0.01, 0.1, 1.0, 10.0]
+    fig, axes = plt.subplots(1, len(gammas), figsize=(4.2 * len(gammas), 4.5),
+                             sharex=True, sharey=True)
+    palette = sns.color_palette("muted", 2)
+
+    xs = np.linspace(X_tr[:, 0].min() - 0.5, X_tr[:, 0].max() + 0.5, 200)
+    ys = np.linspace(X_tr[:, 1].min() - 0.5, X_tr[:, 1].max() + 0.5, 200)
+    XX, YY = np.meshgrid(xs, ys)
+    grid   = np.column_stack([XX.ravel(), YY.ravel()])
+
+    for ax, g in zip(axes, gammas):
+        m = SVM(C=1.0, kernel="rbf", gamma=g, n_iter=300).fit(X_tr, y_tr)
+        ZZ = m.decision_function(grid).reshape(XX.shape)
+        ax.contourf(XX, YY, ZZ, levels=[-1e9, 0, 1e9],
+                    colors=[palette[0], palette[1]], alpha=0.15)
+        ax.contour(XX, YY, ZZ, levels=[0], colors="black", linewidths=1.5)
+        for cls, color in zip([0, 1], palette):
+            mask = y_tr == cls
+            ax.scatter(X_tr[mask, 0], X_tr[mask, 1], color=color, s=14,
+                       edgecolor="white", linewidth=0.4)
+        ax.set(title=f"γ={g}  (acc={m.score(X_tr, y_tr):.3f})",
+               xticks=[], yticks=[])
+
+    fig.suptitle("SVM Exp 3 · γ sweep — RBF bandwidth (moons)",
+                 fontsize=13, fontweight="bold")
+    fig.tight_layout()
+    return fig
+
+
+# ----------------------
+# SVM Experiment 4 — support-vector visualization
+# ----------------------
+
+def exp_svm_support_vectors(cls_type: str) -> mplfig.Figure:
+    """
+    On a 2D scatter, highlight the points the model selected as support
+    vectors. They cluster near the decision boundary — that's the geometric
+    intuition of "the data points that 'support' the margin".
+    """
+    from sklearn.datasets import make_blobs
+    X, y = make_blobs(n_samples=300, centers=2, cluster_std=1.4,
+                      random_state=SEED)
+    X_tr, _, y_tr, _ = _split_scale(X, y)
+
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5.5))
+    palette = sns.color_palette("muted", 2)
+
+    for ax, kernel in zip(axes, ("linear", "rbf")):
+        m = SVM(C=1.0, kernel=kernel, lr=0.01, n_iter=300).fit(X_tr, y_tr)
+
+        xs = np.linspace(X_tr[:, 0].min() - 0.5, X_tr[:, 0].max() + 0.5, 200)
+        ys = np.linspace(X_tr[:, 1].min() - 0.5, X_tr[:, 1].max() + 0.5, 200)
+        XX, YY = np.meshgrid(xs, ys)
+        grid   = np.column_stack([XX.ravel(), YY.ravel()])
+        ZZ     = m.decision_function(grid).reshape(XX.shape)
+
+        ax.contourf(XX, YY, ZZ, levels=[-1e9, 0, 1e9],
+                    colors=[palette[0], palette[1]], alpha=0.15)
+        ax.contour(XX, YY, ZZ, levels=[-1, 0, 1], colors="black",
+                   linestyles=[":", "-", ":"], linewidths=[1, 1.5, 1])
+        for cls, color in zip([0, 1], palette):
+            mask = y_tr == cls
+            ax.scatter(X_tr[mask, 0], X_tr[mask, 1], color=color, s=20,
+                       edgecolor="white", linewidth=0.4, alpha=0.6)
+
+        if kernel == "rbf" and m.support_vectors_ is not None and len(m.support_vectors_) > 0:
+            ax.scatter(m.support_vectors_[:, 0], m.support_vectors_[:, 1],
+                       s=110, facecolors="none", edgecolors="black",
+                       linewidth=1.3, label=f"{len(m.support_vectors_)} SVs")
+            ax.legend(loc="best")
+
+        ax.set(title=f"{kernel} kernel", xticks=[], yticks=[])
+
+    fig.suptitle("SVM Exp 4 · Support vectors cluster near the margin",
+                 fontsize=13, fontweight="bold")
+    fig.tight_layout()
+    return fig
+
+
+# ----------------------
+# SVM Experiment 5 — linear SVM vs LogReg robustness to label noise
+# ----------------------
+
+def exp_svm_vs_logreg(cls_type: str) -> mplfig.Figure:
+    """
+    Linear SVM and LogReg both produce linear decision boundaries but optimize
+    different losses (hinge vs. cross-entropy). Sweep `flip_y` to add label
+    noise and compare accuracy + fit time. Hinge is supposed to be more
+    robust to mislabeled points far from the boundary.
+    """
+    noise_grid = [0.0, 0.05, 0.10, 0.15, 0.20, 0.30]
+    svm_accs, lr_accs, svm_times, lr_times = [], [], [], []
+
+    for nf in noise_grid:
+        X, y = _make_dataset(cls_type, n_samples=800, noise_flip=nf)
+        X_tr, X_te, y_tr, y_te = _split_scale(X, y)
+
+        t0 = perf_counter()
+        svm = SVM(C=1.0, kernel="linear", lr=0.01, n_iter=300).fit(X_tr, y_tr)
+        svm_times.append(perf_counter() - t0)
+
+        t0 = perf_counter()
+        lr  = LogisticRegression(lr=0.05, n_iter=500, type=cls_type).fit(X_tr, y_tr)
+        lr_times.append(perf_counter() - t0)
+
+        svm_accs.append(accuracy_score(y_te, svm.predict(X_te)))
+        lr_accs.append(accuracy_score(y_te, lr.predict(X_te)))
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+
+    axes[0].plot(np.array(noise_grid) * 100, svm_accs, marker="o", label="Linear SVM (hinge)")
+    axes[0].plot(np.array(noise_grid) * 100, lr_accs,  marker="s", label="LogReg (cross-entropy)")
+    axes[0].set(xlabel="Label noise (%)", ylabel="Test accuracy",
+                title="Robustness comparison: SVM vs LogReg")
+    axes[0].legend()
+
+    axes[1].plot(np.array(noise_grid) * 100, svm_times, marker="o", label="Linear SVM")
+    axes[1].plot(np.array(noise_grid) * 100, lr_times,  marker="s", label="LogReg")
+    axes[1].set(xlabel="Label noise (%)", ylabel="Fit time (s)",
+                title="Fit time comparison")
+    axes[1].legend()
+
+    fig.suptitle(f"SVM Exp 5 · Linear SVM vs LogReg  [{cls_type}]",
+                 fontsize=13, fontweight="bold")
+    fig.tight_layout()
+    return fig
+
+
+# ----------------------
+# SVM entry point
+# ----------------------
+
+def evaluate_SVM(cls_type: str = "binary") -> None:
+    if cls_type not in VALID_TYPES:
+        raise ValueError(f"cls_type must be one of {VALID_TYPES}. Got {cls_type!r}.")
+    if cls_type == "all":
+        for t in VALID_TYPES[:-1]:
+            evaluate_SVM(cls_type=t)
+        return
+
+    print(f"Evaluating SVM  [type={cls_type}]  ({N_CLASSES[cls_type]} classes)\n")
+
+    experiments = [
+        ("Linear vs RBF (non-linear data)",  lambda: exp_svm_kernel_comparison(cls_type)),
+        ("C sweep",                          lambda: exp_svm_C_sweep(cls_type)),
+        ("gamma sweep (RBF)",                lambda: exp_svm_gamma_sweep(cls_type)),
+        ("Support vector visualization",     lambda: exp_svm_support_vectors(cls_type)),
+        ("Linear SVM vs LogReg",             lambda: exp_svm_vs_logreg(cls_type)),
+    ]
+
+    for name, fn in experiments:
+        print(f"  -> {name} …")
+        fig = fn()
+
+    print("\nDone.")
+    plt.show()
+
+
+# ----------------------
 # Decision Tree helpers
 # ----------------------
 
@@ -2526,7 +2819,7 @@ def main():
         "--algo", default="logistic_regression",
         choices=["logistic_regression", "knn", "naive_bayes",
                  "decision_tree", "perceptron", "discriminant_analysis",
-                 "random_forest"],
+                 "random_forest", "svm"],
         help="Algorithm to evaluate.",
     )
     parser.add_argument(
@@ -2560,6 +2853,8 @@ def main():
         evaluate_DiscriminantAnalysis(da_variant=args.da_variant, cls_type=args.cls_type)
     elif args.algo == "random_forest":
         evaluate_RandomForest(cls_type=args.cls_type)
+    elif args.algo == "svm":
+        evaluate_SVM(cls_type=args.cls_type)
     else:
         raise ValueError(f"Unsupported algorithm {args.algo!r}.")
 
