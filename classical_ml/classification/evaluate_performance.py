@@ -2,6 +2,7 @@ import numpy as np
 import scipy.stats as stats
 import matplotlib.pyplot as plt
 import matplotlib.figure as mplfig
+import matplotlib.patches as mpatches
 import seaborn as sns
 import argparse
 
@@ -21,6 +22,7 @@ from naive_bayes import BernoulliNB, MultinomialNB, GaussianNB
 from decision_tree import DecisionTree, Node
 from perceptron import Perceptron
 from discriminant_analysis import LDA, QDA
+from random_forest import RandomForest
 
 sns.set_theme(style="whitegrid", palette="muted")
 SEED = 42
@@ -1829,6 +1831,333 @@ def evaluate_DiscriminantAnalysis(da_variant: str = "lda",
 
 
 # ----------------------
+# Random Forest helpers
+# ----------------------
+
+def _new_rf_model(**kwargs) -> RandomForest:
+    return RandomForest(**kwargs)
+
+
+def _rf_eval(cls_type: str, model: RandomForest,
+             X_tr, y_tr, X_te, y_te) -> dict:
+    """Fit-then-evaluate helper for RandomForest. Records fit time."""
+    t0 = perf_counter()
+    model.fit(X_tr, y_tr)
+    fit_time = perf_counter() - t0
+    proba = model.predict_proba(X_te)
+    pred  = model.predict(X_te)
+    return {"fit_time": fit_time,
+            **_compute_metrics(cls_type, y_te, pred, proba),
+            "proba": proba, "pred": pred, "model": model}
+
+
+# ----------------------
+# RF Experiment 1 — n_estimators convergence
+# ----------------------
+
+def exp_rf_n_estimators(cls_type: str) -> mplfig.Figure:
+    """
+    Track test accuracy + OOB error as `n_estimators` grows. Both metrics
+    plateau — the marginal benefit of additional trees vanishes quickly.
+    OOB error is a free internal cross-validation: no held-out set required.
+    """
+    X, y = _make_dataset(cls_type, n_samples=1200)
+    X_tr, X_te, y_tr, y_te = _split_scale(X, y)
+
+    n_grid = [1, 5, 10, 25, 50, 100]
+    test_accs, oob_scores, fit_times = [], [], []
+
+    for n in n_grid:
+        t0 = perf_counter()
+        m = RandomForest(n_estimators=n, max_depth=6,
+                         oob_score=True).fit(X_tr, y_tr)
+        fit_times.append(perf_counter() - t0)
+        test_accs.append(accuracy_score(y_te, m.predict(X_te)))
+        oob_scores.append(m.oob_score_)
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+
+    ax = axes[0]
+    ax.plot(n_grid, test_accs,  marker="o", label="Test accuracy")
+    ax.plot(n_grid, oob_scores, marker="s", ls="--", label="OOB score")
+    ax.set_xscale("log")
+    ax.set(xlabel="n_estimators", ylabel="Score",
+           title="Accuracy plateaus quickly with more trees")
+    ax.legend()
+
+    ax = axes[1]
+    ax.plot(n_grid, fit_times, marker="o", color="darkorange")
+    ax.set_xscale("log")
+    ax.set(xlabel="n_estimators", ylabel="Fit time (s)",
+           title="Fit time grows linearly in n_estimators")
+
+    fig.suptitle(f"RF Exp 1 · n_estimators convergence  [{cls_type}]",
+                 fontsize=13, fontweight="bold")
+    fig.tight_layout()
+    return fig
+
+
+# ----------------------
+# RF Experiment 2 — max_features comparison
+# ----------------------
+
+def exp_rf_max_features(cls_type: str) -> mplfig.Figure:
+    """
+    Compare `sqrt`, `log2`, and `all` (= bagging, no feature randomness) over
+    multiple seeds. Feature randomness should reduce variance — `sqrt` typically
+    matches or beats `all` while producing more consistent results across seeds.
+    """
+    X, y = _make_dataset(cls_type, n_samples=1200, n_features=20, n_informative=12)
+    X_tr, X_te, y_tr, y_te = _split_scale(X, y)
+
+    settings  = [("sqrt", "sqrt"), ("log2", "log2"), ("all", None)]
+    n_seeds   = 4
+    seed_grid = list(range(n_seeds))
+    palette   = sns.color_palette("muted", len(settings))
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+
+    box_data, means = [], []
+    for _, mf in settings:
+        accs = []
+        for s in seed_grid:
+            m = RandomForest(n_estimators=25, max_depth=6,
+                             max_features=mf, random_state=s).fit(X_tr, y_tr)
+            accs.append(accuracy_score(y_te, m.predict(X_te)))
+        box_data.append(accs); means.append(np.mean(accs))
+
+    bp = axes[0].boxplot(box_data, patch_artist=True,
+                         labels=[s[0] for s in settings], widths=0.55)
+    for patch, color in zip(bp["boxes"], palette):
+        patch.set_facecolor(color)
+    axes[0].set(ylabel="Test accuracy",
+                title=f"Accuracy distribution across {n_seeds} seeds")
+
+    bars = axes[1].bar([s[0] for s in settings], means, color=palette,
+                       edgecolor="white", width=0.55)
+    for bar, v in zip(bars, means):
+        axes[1].text(bar.get_x() + bar.get_width()/2, v + 0.003,
+                     f"{v:.3f}", ha="center", va="bottom", fontsize=9)
+    axes[1].set(ylabel="Mean accuracy", ylim=(min(means) - 0.05, 1.0),
+                title="Mean accuracy by max_features")
+
+    fig.suptitle(f"RF Exp 2 · max_features comparison  [{cls_type}]",
+                 fontsize=13, fontweight="bold")
+    fig.tight_layout()
+    return fig
+
+
+# ----------------------
+# RF Experiment 3 — single tree vs forest variance
+# ----------------------
+
+def exp_rf_tree_vs_forest_variance(cls_type: str) -> mplfig.Figure:
+    """
+    Bagging reduces variance. Fit a single deep tree vs. a forest under M
+    different bootstrap seeds; for each test sample, measure the variance of
+    its P(class) prediction across seeds. Tree predictions should be highly
+    variable per-sample; forest predictions should be tight.
+    """
+    X, y = _make_dataset(cls_type, n_samples=1000, noise_flip=0.05)
+    X_tr, X_te, y_tr, y_te = _split_scale(X, y)
+
+    n_repeats = 5
+    classes = np.unique(y_te)
+    K = len(classes)
+    tree_probas   = np.zeros((n_repeats, len(y_te), K))
+    forest_probas = np.zeros((n_repeats, len(y_te), K))
+
+    rng = np.random.default_rng(SEED)
+    n_tr = len(X_tr)
+    for r in range(n_repeats):
+        idx = rng.integers(0, n_tr, size=n_tr)
+        Xb, yb = X_tr[idx], y_tr[idx]
+
+        t = DecisionTree(max_depth=8).fit(Xb, yb)
+        f = RandomForest(n_estimators=25, max_depth=8,
+                         random_state=r).fit(Xb, yb)
+        # Align to global classes for each
+        tp = t.predict_proba(X_te)               # always (n, K_tree)
+        fp = f.predict_proba(X_te)
+        if fp.ndim == 1:                          # binary collapse
+            fp = np.column_stack([1 - fp, fp])
+        assert t.classes_ is not None
+        for i, c in enumerate(t.classes_):
+            j = int(np.searchsorted(classes, c))
+            tree_probas[r, :, j] = tp[:, i]
+        # forest already in (n, K)
+        forest_probas[r] = fp
+
+    # Per-sample variance of P(class 0) across the M repeats
+    tree_var   = tree_probas[:, :, 0].var(axis=0)
+    forest_var = forest_probas[:, :, 0].var(axis=0)
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+
+    axes[0].hist(tree_var,   bins=40, alpha=0.6, color="crimson",   label="Single tree")
+    axes[0].hist(forest_var, bins=40, alpha=0.6, color="steelblue", label="Forest")
+    axes[0].set(xlabel="Per-sample variance of P(class=0) across seeds",
+                ylabel="Count",
+                title="Bagging shrinks per-sample variance")
+    axes[0].legend()
+
+    axes[1].boxplot([tree_var, forest_var], labels=["Single tree", "Forest"],
+                    widths=0.5)
+    axes[1].set(ylabel="Per-sample variance",
+                title=f"Median var: tree={np.median(tree_var):.4f}  "
+                      f"forest={np.median(forest_var):.4f}")
+
+    fig.suptitle(f"RF Exp 3 · Single tree vs forest variance  [{cls_type}]",
+                 fontsize=13, fontweight="bold")
+    fig.tight_layout()
+    return fig
+
+
+# ----------------------
+# RF Experiment 4 — feature importance vs ground truth
+# ----------------------
+
+def exp_rf_feature_importance(cls_type: str) -> mplfig.Figure:
+    """
+    Generate data with known informative / redundant / noise features, fit
+    a forest, and color-code the importance bar chart by ground truth.
+    A well-behaved forest concentrates importance on the informative columns.
+    """
+    n_features   = 15
+    n_informative = 6
+    n_redundant   = 3
+    # remaining n_features - n_informative - n_redundant are pure noise
+    n_cls = N_CLASSES[cls_type]
+
+    X, y = make_classification(
+        n_samples=1500, n_features=n_features,
+        n_informative=max(n_informative, n_cls),
+        n_redundant=n_redundant,
+        n_clusters_per_class=1, n_classes=n_cls,
+        shuffle=False,                            # keep informative cols first
+        random_state=SEED,
+    )
+    # Only need a train split for fitting; test set is not used here since
+    # the experiment inspects fitted attributes, not predictions.
+    X_tr, _, y_tr, _ = _split_scale(X, y)
+
+    m = RandomForest(n_estimators=80, max_depth=6).fit(X_tr, y_tr)
+    importances = m.feature_importances_
+    assert importances is not None
+
+    # Color: informative=green, redundant=orange, noise=gray
+    colors = []
+    for i in range(n_features):
+        if i < max(n_informative, n_cls):
+            colors.append("seagreen")
+        elif i < max(n_informative, n_cls) + n_redundant:
+            colors.append("orange")
+        else:
+            colors.append("lightgray")
+
+    fig, ax = plt.subplots(figsize=(12, 5))
+    ax.bar(np.arange(n_features), importances, color=colors, edgecolor="white")
+    ax.set(xlabel="Feature index", ylabel="Importance",
+           title=(f"Forest feature importances  "
+                  f"[{n_informative} informative / {n_redundant} redundant / "
+                  f"{n_features - n_informative - n_redundant} noise]"))
+    ax.set_xticks(np.arange(n_features))
+
+    handles = [
+        mpatches.Patch(color="seagreen",  label="informative"),
+        mpatches.Patch(color="orange",    label="redundant"),
+        mpatches.Patch(color="lightgray", label="noise"),
+    ]
+    ax.legend(handles=handles)
+
+    fig.suptitle(f"RF Exp 4 · Feature importance vs ground truth  [{cls_type}]",
+                 fontsize=13, fontweight="bold")
+    fig.tight_layout()
+    return fig
+
+
+# ----------------------
+# RF Experiment 5 — scalability heatmap
+# ----------------------
+
+def exp_rf_scalability(cls_type: str) -> mplfig.Figure:
+    """
+    Fit time scales as O(n_estimators · single-tree-fit). Single-tree fit in
+    this implementation is roughly O(n · d · depth). So total: linear in
+    n_estimators, ~linear in n_samples for fixed depth.
+    """
+    n_estimators_grid = [10, 25, 50]
+    sample_grid       = [200, 500, 1000]
+    n_cls = N_CLASSES[cls_type]
+
+    fit_time_mat = np.zeros((len(sample_grid), len(n_estimators_grid)))
+    auc_mat      = np.zeros_like(fit_time_mat)
+
+    for i, n in enumerate(sample_grid):
+        for j, ne in enumerate(n_estimators_grid):
+            n_inf = max(n_cls, 6)
+            X, y  = _make_dataset(cls_type, n_samples=n, n_features=10,
+                                  n_informative=n_inf)
+            X_tr, X_te, y_tr, y_te = _split_scale(X, y)
+            r = _rf_eval(cls_type,
+                         RandomForest(n_estimators=ne, max_depth=6),
+                         X_tr, y_tr, X_te, y_te)
+            fit_time_mat[i, j] = r["fit_time"]
+            auc_mat[i, j]      = r["roc_auc"]
+
+    row_labels = [str(n)  for n  in sample_grid]
+    col_labels = [str(ne) for ne in n_estimators_grid]
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+    sns.heatmap(fit_time_mat, annot=True, fmt=".2f", cmap="YlOrRd",
+                xticklabels=col_labels, yticklabels=row_labels,
+                ax=axes[0], linewidths=0.4)
+    axes[0].set(xlabel="n_estimators", ylabel="n_samples",
+                title="Fit time (s) — linear in n_estimators")
+
+    sns.heatmap(auc_mat, annot=True, fmt=".3f", cmap="Blues",
+                xticklabels=col_labels, yticklabels=row_labels,
+                ax=axes[1], linewidths=0.4, vmin=0.5, vmax=1.0)
+    axes[1].set(xlabel="n_estimators", ylabel="n_samples", title="ROC-AUC")
+
+    fig.suptitle(f"RF Exp 5 · Scalability  [{cls_type}]",
+                 fontsize=13, fontweight="bold")
+    fig.tight_layout()
+    return fig
+
+
+# ----------------------
+# Random Forest entry point
+# ----------------------
+
+def evaluate_RandomForest(cls_type: str = "binary") -> None:
+    if cls_type not in VALID_TYPES:
+        raise ValueError(f"cls_type must be one of {VALID_TYPES}. Got {cls_type!r}.")
+    if cls_type == "all":
+        for t in VALID_TYPES[:-1]:
+            evaluate_RandomForest(cls_type=t)
+        return
+
+    print(f"Evaluating RandomForest  [type={cls_type}]  "
+          f"({N_CLASSES[cls_type]} classes)\n")
+
+    experiments = [
+        ("n_estimators convergence",       lambda: exp_rf_n_estimators(cls_type)),
+        ("max_features comparison",        lambda: exp_rf_max_features(cls_type)),
+        ("Tree vs forest variance",        lambda: exp_rf_tree_vs_forest_variance(cls_type)),
+        ("Feature importance",             lambda: exp_rf_feature_importance(cls_type)),
+        ("Scalability",                    lambda: exp_rf_scalability(cls_type)),
+    ]
+
+    for name, fn in experiments:
+        print(f"  -> {name} …")
+        fig = fn()
+
+    print("\nDone.")
+    plt.show()
+
+
+# ----------------------
 # Decision Tree helpers
 # ----------------------
 
@@ -2196,7 +2525,8 @@ def main():
     parser.add_argument(
         "--algo", default="logistic_regression",
         choices=["logistic_regression", "knn", "naive_bayes",
-                 "decision_tree", "perceptron", "discriminant_analysis"],
+                 "decision_tree", "perceptron", "discriminant_analysis",
+                 "random_forest"],
         help="Algorithm to evaluate.",
     )
     parser.add_argument(
@@ -2228,6 +2558,8 @@ def main():
         evaluate_Perceptron(cls_type=args.cls_type)
     elif args.algo == "discriminant_analysis":
         evaluate_DiscriminantAnalysis(da_variant=args.da_variant, cls_type=args.cls_type)
+    elif args.algo == "random_forest":
+        evaluate_RandomForest(cls_type=args.cls_type)
     else:
         raise ValueError(f"Unsupported algorithm {args.algo!r}.")
 

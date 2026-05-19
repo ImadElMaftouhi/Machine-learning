@@ -3,6 +3,7 @@ from .knn import KNN
 from .naive_bayes import MultinomialNB, BernoulliNB
 from .perceptron import Perceptron
 from .discriminant_analysis import LDA, QDA
+from .random_forest import RandomForest
 
 
 __all__= [
@@ -11,4 +12,5 @@ __all__= [
     "Perceptron",
     "LDA",
     "QDA",
+    "RandomForest",
 ]
