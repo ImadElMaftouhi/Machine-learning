@@ -18,6 +18,7 @@ from time import perf_counter
 from logistic_regression import LogisticRegression
 from knn import KNN
 from naive_bayes import BernoulliNB, MultinomialNB, GaussianNB
+from decision_tree import DecisionTree, Node
 
 sns.set_theme(style="whitegrid", palette="muted")
 SEED = 42
@@ -1181,6 +1182,366 @@ def evaluate_NaiveBayes(nb_variant: str = "gaussian", cls_type: str = "binary") 
     plt.show()
 
 
+# ----------------------
+# Decision Tree helpers
+# ----------------------
+
+def _count_nodes(node: Node | None) -> tuple[int, int]:
+    """Return (total_nodes, leaf_count) under `node`."""
+    if node is None:
+        return 0, 0
+    if node.is_leaf:
+        return 1, 1
+    n_l, l_l = _count_nodes(node.left)
+    n_r, l_r = _count_nodes(node.right)
+    return 1 + n_l + n_r, l_l + l_r
+
+
+def _tree_depth(node: Node | None) -> int:
+    """Actual depth of fitted tree (root with no children → 0)."""
+    if node is None or node.is_leaf:
+        return 0
+    return 1 + max(_tree_depth(node.left), _tree_depth(node.right))
+
+
+def _dt_eval(cls_type: str, model: DecisionTree, X_tr, y_tr, X_te, y_te) -> dict:
+    """Fit-then-evaluate helper for DecisionTree. Records fit time.
+
+    DecisionTree.predict_proba always returns shape (n, K). For binary,
+    _compute_metrics expects a 1D positive-class score (matching the other
+    classifiers in this module), so we collapse to column 1.
+    """
+    t0 = perf_counter()
+    model.fit(X_tr, y_tr)
+    fit_time = perf_counter() - t0
+    proba_2d = model.predict_proba(X_te)
+    pred     = model.predict(X_te)
+    proba_metric = proba_2d[:, 1] if cls_type == "binary" else proba_2d
+    return {"fit_time": fit_time,
+            **_compute_metrics(cls_type, y_te, pred, proba_metric),
+            "proba": proba_2d, "pred": pred, "tree": model}
+
+
+# ----------------------
+# DT Experiment 1 – depth sweep (bias-variance)
+# ----------------------
+
+def exp_dt_depth_sweep(cls_type: str) -> mplfig.Figure:
+    """
+    The canonical bias-variance plot for trees.
+    depth=1  → one stump → high bias.
+    depth=20 → leaves of size 1 → memorizes training set → high variance.
+    Tree size grows roughly exponentially with depth on noisy data.
+    """
+    X, y = _make_dataset(cls_type, n_samples=1500, noise_flip=0.05)
+    X_tr, X_te, y_tr, y_te = _split_scale(X, y)
+
+    depth_grid = list(range(1, 21))
+    train_accs, test_accs, test_f1s, n_nodes_list = [], [], [], []
+
+    for d in depth_grid:
+        m = DecisionTree(max_depth=d).fit(X_tr, y_tr)
+        train_accs.append(accuracy_score(y_tr, m.predict(X_tr)))
+        pred = m.predict(X_te)
+        proba_2d = m.predict_proba(X_te)
+        proba_metric = proba_2d[:, 1] if cls_type == "binary" else proba_2d
+        mts = _compute_metrics(cls_type, y_te, pred, proba_metric)
+        test_accs.append(mts["accuracy"])
+        test_f1s.append(mts["f1"])
+        n_total, _ = _count_nodes(m.root_)
+        n_nodes_list.append(n_total)
+
+    best_d = depth_grid[int(np.argmax(test_f1s))]
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+
+    ax = axes[0]
+    ax.plot(depth_grid, train_accs, ls="--", marker=".", label="Train accuracy")
+    ax.plot(depth_grid, test_accs,  marker=".",         label="Test accuracy")
+    ax.plot(depth_grid, test_f1s,   marker=".",         label="Test F1 (macro)")
+    ax.axvline(best_d, color="red", ls=":", alpha=0.7, label=f"Best depth={best_d}")
+    ax.fill_between(depth_grid,
+                    [tr - te for tr, te in zip(train_accs, test_accs)],
+                    alpha=0.08, color="red", label="Overfit gap")
+    ax.set(xlabel="max_depth", ylabel="Score",
+           title="Bias-variance: train vs. test as tree grows")
+    ax.legend(fontsize=9)
+
+    ax = axes[1]
+    ax.plot(depth_grid, n_nodes_list, marker="o", color="darkorange")
+    ax.set(xlabel="max_depth", ylabel="Total nodes",
+           title="Tree size grows roughly exponentially with depth")
+    ax.set_yscale("log")
+
+    fig.suptitle(f"DT Exp 1 · Depth sweep  [{cls_type}]", fontsize=13, fontweight="bold")
+    fig.tight_layout()
+    return fig
+
+
+# ----------------------
+# DT Experiment 2 – entropy vs gini
+# ----------------------
+
+def exp_dt_criterion_comparison(cls_type: str, max_depth: int = 8) -> mplfig.Figure:
+    """
+    Entropy and gini share the same shape (concave on [0,1], zero at pure leaves,
+    max at uniform). They tend to pick nearly identical splits in practice.
+    Gini avoids `log` so it's usually a touch faster.
+    """
+    X, y = _make_dataset(cls_type, n_samples=2000)
+    X_tr, X_te, y_tr, y_te = _split_scale(X, y)
+
+    criteria    = ["entropy", "gini"]
+    metric_cols = ["accuracy", "f1", "roc_auc", "log_loss"]
+    palette     = sns.color_palette("muted", len(criteria))
+    results: dict[str, dict] = {}
+
+    for c in criteria:
+        m = DecisionTree(max_depth=max_depth, criterion=c)  # type: ignore[arg-type]
+        results[c] = _dt_eval(cls_type, m, X_tr, y_tr, X_te, y_te)
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+
+    # Grouped metric bar chart
+    ax    = axes[0]
+    x     = np.arange(len(metric_cols))
+    bar_w = 0.35
+    for i, c in enumerate(criteria):
+        vals = [results[c][mc] for mc in metric_cols]
+        bars = ax.bar(x + i * bar_w, vals, width=bar_w, label=c, color=palette[i])
+        for bar, v in zip(bars, vals):
+            ax.text(bar.get_x() + bar.get_width() / 2, v + 0.01,
+                    f"{v:.3f}", ha="center", va="bottom", fontsize=7)
+    ax.set_xticks(x + bar_w / 2)
+    ax.set_xticklabels(metric_cols)
+    ax.set(ylabel="Score", title=f"Metric comparison (max_depth={max_depth})")
+    ax.legend()
+
+    # Fit time
+    ax    = axes[1]
+    times = [results[c]["fit_time"] for c in criteria]
+    bars  = ax.bar(criteria, times, color=palette, edgecolor="white", width=0.5)
+    for bar, t in zip(bars, times):
+        ax.text(bar.get_x() + bar.get_width() / 2, t + max(times) * 0.01,
+                f"{t*1000:.1f} ms", ha="center", va="bottom", fontsize=9)
+    ax.set(ylabel="Fit time (s)", title="Fit time — entropy pays for log calls")
+
+    fig.suptitle(f"DT Exp 2 · Entropy vs Gini  [{cls_type}]",
+                 fontsize=13, fontweight="bold")
+    fig.tight_layout()
+    return fig
+
+
+# ----------------------
+# DT Experiment 3 – regularization via min_samples_leaf
+# ----------------------
+
+def exp_dt_regularization(cls_type: str, max_depth: int = 20) -> mplfig.Figure:
+    """
+    `min_samples_leaf` forces each leaf to contain at least N samples.
+    Larger N → fewer, larger leaves → simpler boundary → closes train/test gap.
+    Run with elevated label noise so the regularization signal is clearer.
+    """
+    X, y = _make_dataset(cls_type, n_samples=1500, noise_flip=0.10)
+    X_tr, X_te, y_tr, y_te = _split_scale(X, y)
+
+    leaf_grid = [1, 2, 5, 10, 20, 50, 100, 200]
+    train_accs, test_accs, n_leaves_list, actual_depths = [], [], [], []
+
+    for n_leaf in leaf_grid:
+        m = DecisionTree(max_depth=max_depth, min_samples_leaf=n_leaf).fit(X_tr, y_tr)
+        train_accs.append(accuracy_score(y_tr, m.predict(X_tr)))
+        test_accs.append(accuracy_score(y_te, m.predict(X_te)))
+        _, n_leaves = _count_nodes(m.root_)
+        n_leaves_list.append(n_leaves)
+        actual_depths.append(_tree_depth(m.root_))
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+
+    ax = axes[0]
+    ax.semilogx(leaf_grid, train_accs, ls="--", marker="o", label="Train accuracy")
+    ax.semilogx(leaf_grid, test_accs,  marker="s",          label="Test accuracy")
+    ax.set(xlabel="min_samples_leaf", ylabel="Accuracy",
+           title="Leaf-size regularization closes the train/test gap")
+    ax.legend()
+
+    ax  = axes[1]
+    ax.semilogx(leaf_grid, n_leaves_list, marker="o", color="purple",
+                label="# leaves")
+    ax2 = ax.twinx()
+    ax2.semilogx(leaf_grid, actual_depths, marker="s", ls="--",
+                 color="darkorange", label="Actual depth")
+    ax.set(xlabel="min_samples_leaf", ylabel="Number of leaves",
+           title="Tree complexity vs. leaf-size constraint")
+    ax2.set_ylabel("Actual tree depth")
+    ax.legend(loc="upper right");  ax2.legend(loc="center right")
+
+    fig.suptitle(f"DT Exp 3 · Regularization  [{cls_type}]",
+                 fontsize=13, fontweight="bold")
+    fig.tight_layout()
+    return fig
+
+
+# ----------------------
+# DT Experiment 4 – confusion + calibration (trees are overconfident)
+# ----------------------
+
+def exp_dt_confusion_calibration(cls_type: str, max_depth: int = 8) -> mplfig.Figure:
+    """
+    Tree probabilities are leaf class frequencies. Deep trees produce pure leaves
+    → probas pile up near 0/1 regardless of true confidence. The reliability
+    diagram + max-confidence histogram make this visible.
+    """
+    X, y = _make_dataset(cls_type, n_samples=3000)
+    X_tr, X_te, y_tr, y_te = _split_scale(X, y)
+    r       = _dt_eval(cls_type, DecisionTree(max_depth=max_depth), X_tr, y_tr, X_te, y_te)
+    proba, pred = r["proba"], r["pred"]
+    classes = np.unique(y_te)
+    K       = len(classes)
+    palette = sns.color_palette("muted", K)
+
+    fig, axes = plt.subplots(1, 3, figsize=(17, 5))
+
+    # Confusion matrix
+    ax = axes[0]
+    cm      = confusion_matrix(y_te, pred, labels=classes)
+    cm_norm = cm.astype(float) / cm.sum(axis=1, keepdims=True)
+    sns.heatmap(cm_norm, annot=True, fmt=".2%", cmap="Blues",
+                xticklabels=[str(c) for c in classes],
+                yticklabels=[str(c) for c in classes],
+                ax=ax, linewidths=0.5)
+    for (i, j), raw in np.ndenumerate(cm):
+        ax.text(j + 0.5, i + 0.72, f"n={raw}", ha="center", va="center",
+                fontsize=7, color="gray")
+    ax.set(title=f"Confusion matrix  (max_depth={max_depth})",
+           xlabel="Predicted", ylabel="True")
+
+    # Reliability diagram
+    ax     = axes[1]
+    n_bins = 10
+    bins   = np.linspace(0, 1, n_bins + 1)
+    ax.plot([0, 1], [0, 1], "k--", alpha=0.5, label="Perfect")
+
+    if cls_type == "binary":
+        p1d = proba if proba.ndim == 1 else proba[:, 1]
+        bin_ids = np.digitize(p1d, bins[1:-1])
+        mean_pred = [p1d[bin_ids == b].mean()  if (bin_ids == b).any() else np.nan for b in range(n_bins)]
+        frac_pos  = [y_te[bin_ids == b].mean() if (bin_ids == b).any() else np.nan for b in range(n_bins)]
+        ax.plot(mean_pred, frac_pos, marker="o", lw=2, label="Tree")
+    else:
+        Y_bin = np.asarray(label_binarize(y_te, classes=classes))
+        for k in range(K):
+            pk       = proba[:, k]
+            bin_ids  = np.digitize(pk, bins[1:-1])
+            mean_pred = [pk[bin_ids == b].mean()       if (bin_ids == b).any() else np.nan for b in range(n_bins)]
+            frac_pos  = [Y_bin[bin_ids == b, k].mean() if (bin_ids == b).any() else np.nan for b in range(n_bins)]
+            ax.plot(mean_pred, frac_pos, marker="o", lw=1.5,
+                    color=palette[k], label=f"class {classes[k]}")
+
+    ax.set(xlabel="Mean predicted probability", ylabel="Fraction of positives",
+           title="Reliability — trees pile probas near 0 and 1",
+           xlim=(0, 1), ylim=(0, 1))
+    ax.legend(fontsize=8)
+
+    # Max-confidence histogram (correct vs. incorrect)
+    ax       = axes[2]
+    if proba.ndim == 1:
+        max_conf = np.maximum(proba, 1 - proba)
+    else:
+        max_conf = proba.max(axis=1)
+    correct  = (pred == y_te)
+    ax.hist(max_conf[correct],  bins=20, alpha=0.65, color="steelblue", label="Correct")
+    ax.hist(max_conf[~correct], bins=20, alpha=0.65, color="crimson",   label="Incorrect")
+    ax.set(xlabel="Max predicted probability", ylabel="Count",
+           title="Confidence distribution")
+    ax.legend()
+
+    fig.suptitle(f"DT Exp 4 · Confusion & calibration  [{cls_type}]",
+                 fontsize=13, fontweight="bold")
+    fig.tight_layout()
+    return fig
+
+
+# ----------------------
+# DT Experiment 5 – scalability (fit time heatmap)
+# ----------------------
+
+def exp_dt_scalability(cls_type: str, max_depth: int = 8) -> mplfig.Figure:
+    """
+    This implementation's fit cost is roughly O(n · d · depth) — every node
+    re-scans all features and all unique thresholds. Production trees (sklearn)
+    use presorting / histograms to amortize this to O(n · d · log n).
+    """
+    sample_grid  = [200, 500, 1000, 3000, 5000]
+    feature_grid = [5, 10, 20, 50, 100]
+    n_cls = N_CLASSES[cls_type]
+
+    fit_time_mat = np.zeros((len(sample_grid), len(feature_grid)))
+    auc_mat      = np.zeros_like(fit_time_mat)
+
+    for i, n in enumerate(sample_grid):
+        for j, d in enumerate(feature_grid):
+            n_inf = max(n_cls, min(d, d // 2))
+            X, y  = _make_dataset(cls_type, n_samples=n, n_features=d,
+                                  n_informative=n_inf)
+            X_tr, X_te, y_tr, y_te = _split_scale(X, y)
+            r = _dt_eval(cls_type, DecisionTree(max_depth=max_depth),
+                         X_tr, y_tr, X_te, y_te)
+            fit_time_mat[i, j] = r["fit_time"]
+            auc_mat[i, j]      = r["roc_auc"]
+
+    row_labels = [str(n) for n in sample_grid]
+    col_labels = [str(d) for d in feature_grid]
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+    sns.heatmap(fit_time_mat, annot=True, fmt=".3f", cmap="YlOrRd",
+                xticklabels=col_labels, yticklabels=row_labels,
+                ax=axes[0], linewidths=0.4)
+    axes[0].set(xlabel="n_features", ylabel="n_samples",
+                title=f"Fit time (s)  — O(n·d·depth)  [max_depth={max_depth}]")
+
+    sns.heatmap(auc_mat, annot=True, fmt=".3f", cmap="Blues",
+                xticklabels=col_labels, yticklabels=row_labels,
+                ax=axes[1], linewidths=0.4, vmin=0.5, vmax=1.0)
+    axes[1].set(xlabel="n_features", ylabel="n_samples", title="ROC-AUC")
+
+    fig.suptitle(f"DT Exp 5 · Scalability  [{cls_type}]",
+                 fontsize=13, fontweight="bold")
+    fig.tight_layout()
+    return fig
+
+
+# ----------------------
+# Decision Tree entry point
+# ----------------------
+
+def evaluate_DecisionTree(cls_type: str = "binary") -> None:
+    if cls_type not in VALID_TYPES:
+        raise ValueError(f"cls_type must be one of {VALID_TYPES}. Got {cls_type!r}.")
+    if cls_type == "all":
+        for t in VALID_TYPES[:-1]:
+            evaluate_DecisionTree(cls_type=t)
+        return
+
+    print(f"Evaluating DecisionTree  [type={cls_type}]  "
+          f"({N_CLASSES[cls_type]} classes)\n")
+
+    experiments = [
+        ("Depth sweep (bias-variance)", lambda: exp_dt_depth_sweep(cls_type)),
+        ("Entropy vs Gini",             lambda: exp_dt_criterion_comparison(cls_type)),
+        ("Regularization",              lambda: exp_dt_regularization(cls_type)),
+        ("Confusion & calibration",     lambda: exp_dt_confusion_calibration(cls_type)),
+        ("Scalability",                 lambda: exp_dt_scalability(cls_type)),
+    ]
+
+    for name, fn in experiments:
+        print(f"  -> {name} …")
+        fig = fn()
+
+    print("\nDone.")
+    plt.show()
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Evaluate classification algorithms.",
@@ -1188,7 +1549,7 @@ def main():
     )
     parser.add_argument(
         "--algo", default="logistic_regression",
-        choices=["logistic_regression", "knn", "naive_bayes"],
+        choices=["logistic_regression", "knn", "naive_bayes", "decision_tree"],
         help="Algorithm to evaluate.",
     )
     parser.add_argument(
@@ -1209,6 +1570,8 @@ def main():
         evaluate_KNN(cls_type=args.cls_type)
     elif args.algo == "naive_bayes":
         evaluate_NaiveBayes(nb_variant=args.nb_variant, cls_type=args.cls_type)
+    elif args.algo == "decision_tree":
+        evaluate_DecisionTree(cls_type=args.cls_type)
     else:
         raise ValueError(f"Unsupported algorithm {args.algo!r}.")
 
