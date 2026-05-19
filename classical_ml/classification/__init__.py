@@ -1,9 +1,14 @@
 from .logistic_regression import LogisticRegression
 from .knn import KNN
 from .naive_bayes import MultinomialNB, BernoulliNB
+from .perceptron import Perceptron
+from .discriminant_analysis import LDA, QDA
 
 
 __all__= [
     "LogisticRegression",
     "KNN",
+    "Perceptron",
+    "LDA",
+    "QDA",
 ]
