@@ -1,0 +1,3 @@
+# Matplotlib
+
+Matplotlib occupies a peculiar position in the scientific Python ecosystem. It is simultaneously the oldest general-purpose plotting library in wide use and the substrate on which most newer libraries (seaborn, pandas plotting, xarray, scikit-learn's `plot_*` helpers) are built. Understanding it well therefore pays a compound return: you gain direct control over publication figures, and you gain the ability to debug and extend the higher-level tools that delegate to it. This document develops the library from its object model outward, because nearly every difficulty users encounter, from inexplicable layouts to labels that vanish under `tight_layout`, traces back to a misunderstanding of how figures, axes, and artists relate to one another.
